@@ -113,19 +113,21 @@ class Exp{{类名}}(BaseExperiment):
 
 ## Step 4: 注册实验
 
-在 `experiments/text/__init__.py` 中：
+在对应的 `experiments/{{类别}}/__init__.py` 中：
 
 1. 顶部 import 新实验 class
-2. 在 `TEXT_EXPERIMENTS` 字典里加一项（expN 自增）
+2. 在注册字典里加一项，**key = 实验文件名**（不用数字）
 
 ```python
-from experiments.text.{{文件名}} import Exp{{类名}}
+from experiments.{{类别}}.{{文件名}} import Exp{{类名}}
 
-TEXT_EXPERIMENTS = {
+{{注册表名}} = {
     ...
-    "exp6": Exp{{类名}}(),   # ← 新增
+    "{{文件名}}": Exp{{类名}}(),   # ← 新增
 }
 ```
+
+> **key 命名规则**: key = 文件名（不含 .py）。如 `stroke.py` → `"stroke"`。避免 exp1/exp2 数字混乱。
 
 ## Step 5: 跑实验
 

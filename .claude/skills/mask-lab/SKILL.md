@@ -57,24 +57,26 @@ results/                              ← 输出
 run.py                                ← CLI 入口
 ```
 
-## 5 个实验
+## 实验列表 (6个)
 
-| 实验 | 文件 | 假设 |
+`uv run python run.py --list` 查看最新列表。
+
+| key | 文件 | 假设 |
 |------|------|------|
-| Exp1 中英文 | text/lang.py | 中英文两种书写系统，embedding 应能区分 |
-| Exp2 位置不变 | text/position.py | 同字符在不同位置，embedding 应高度相似 |
-| Exp3 颜色可分 | text/color.py | 不同颜色在物理通道上有不同签名，应能区分 |
-| Exp4 位置编码 | text/pos_encode.py | 同位置样本间有微量相似性，可弱编码位置 |
-| Exp5 字符可分 | text/char.py | 不同字符有不同形状结构，应能区分 |
+| lang | text/lang.py | 中英文两种书写系统，embedding 应能区分 |
+| position | text/position.py | 同字符在不同位置，embedding 应高度相似 |
+| color | text/color.py | 不同颜色在物理通道上有不同签名，应能区分 |
+| pos_encode | text/pos_encode.py | 同位置样本间有微量相似性，可弱编码位置 |
+| char | text/char.py | 不同字符有不同形状结构，应能区分 |
+| pixel | vision/pixel.py | 单像素在不同位置应可分，数量应可分 |
 
 ## 运行
 
 ```bash
-uv run python run.py                          # 全部实验
-uv run python run.py --algo gabor_lift        # 选算法
-uv run python run.py --exp exp3               # 单实验
-uv run python run.py --letters A,B,C          # 自定义字母
-uv run python run.py --colors Red,Blue        # 自定义颜色
+uv run python run.py                          # 默认文字实验
+uv run python run.py --exp pixel              # 单实验
+uv run python run.py --list                   # 列出所有实验
+uv run python run.py --category vision        # 跑全部视觉实验
 uv run python run.py --no-viz                 # 跳过图片
 ```
 

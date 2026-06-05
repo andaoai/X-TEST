@@ -10,7 +10,7 @@ Mask Embedding Lab
 用法:
   uv run python run.py                          # 默认文字实验
   uv run python run.py --algo gabor_lift
-  uv run python run.py --exp exp6               # 像素实验
+  uv run python run.py --exp pixel              # 像素实验
   uv run python run.py --category vision        # 跑全部视觉实验
 """
 import sys, json, argparse
@@ -43,10 +43,12 @@ def _json_safe(obj):
 def parse_args():
     p = argparse.ArgumentParser("Mask Embedding Lab")
     p.add_argument("--algo", default="gabor_lift", choices=list(ALGOS))
-    p.add_argument("--exp",  default=None)
+    p.add_argument("--exp",  default=None, metavar="NAME",
+                   help=f"单实验: {', '.join(ALL_EXPERIMENTS)}")
     p.add_argument("--category", default=None, choices=["text","vision"])
-    p.add_argument("--letters", default=None, help="A,B,C (仅文字实验)")
-    p.add_argument("--colors",  default=None, help="Red,Blue (仅文字实验)")
+    p.add_argument("--list", action="store_true", help="列出所有实验")
+    p.add_argument("--letters", default=None, help="A,B,C (仅文字)")
+    p.add_argument("--colors",  default=None, help="Red,Blue (仅文字)")
     p.add_argument("--no-viz", action="store_true")
     return p.parse_args()
 
@@ -55,8 +57,18 @@ def main():
     args = parse_args()
     algo = ALGOS[args.algo]
 
+    # 列出实验
+    if args.list:
+        print("\n实验列表:")
+        for key, exp in ALL_EXPERIMENTS.items():
+            print(f"  {key:14s} [{exp.__class__.__module__.split('.')[-2]:6s}] {exp.name}")
+        return 0
+
     # 选实验
     if args.exp:
+        if args.exp not in ALL_EXPERIMENTS:
+            print(f"未知实验: {args.exp}. 可用: {', '.join(ALL_EXPERIMENTS)}")
+            return 1
         exps = {args.exp: ALL_EXPERIMENTS[args.exp]}
     elif args.category == "vision":
         exps = dict(VISION_EXPERIMENTS)
