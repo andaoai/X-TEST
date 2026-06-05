@@ -24,10 +24,19 @@ import numpy as np
 from algorithms import ALGOS
 from experiments.source.synthetic.config import OUTPUT_ROOT, COLORS
 from experiments.text import TEXT_EXPERIMENTS
+from experiments.text.independence import INDEPENDENCE_EXPERIMENTS
+from experiments.text.separability import SEPARABILITY_EXPERIMENTS
+from experiments.text.capacity import CAPACITY_EXPERIMENTS
 from experiments.vision import VISION_EXPERIMENTS
 from experiments.viz import summary_bar
 
-ALL_EXPERIMENTS = {**TEXT_EXPERIMENTS, **VISION_EXPERIMENTS}
+ALL_EXPERIMENTS = {
+    **TEXT_EXPERIMENTS,
+    **VISION_EXPERIMENTS,
+    **{k: v() for k, v in INDEPENDENCE_EXPERIMENTS.items()},
+    **{k: v() for k, v in SEPARABILITY_EXPERIMENTS.items()},
+    **{k: v() for k, v in CAPACITY_EXPERIMENTS.items()},
+}
 
 
 def _json_safe(obj):
@@ -42,10 +51,11 @@ def _json_safe(obj):
 
 def parse_args():
     p = argparse.ArgumentParser("Mask Embedding Lab")
-    p.add_argument("--algo", default="gabor_lift", choices=list(ALGOS))
+    p.add_argument("--algo", default="random_proj", choices=list(ALGOS))
     p.add_argument("--exp",  default=None, metavar="NAME",
                    help=f"单实验: {', '.join(ALL_EXPERIMENTS)}")
-    p.add_argument("--category", default=None, choices=["text","vision"])
+    p.add_argument("--category", default=None,
+                   choices=["text", "vision", "independence", "separability", "capacity"])
     p.add_argument("--list", action="store_true", help="列出所有实验")
     p.add_argument("--letters", default=None, help="A,B,C (仅文字)")
     p.add_argument("--colors",  default=None, help="Red,Blue (仅文字)")
@@ -74,6 +84,12 @@ def main():
         exps = dict(VISION_EXPERIMENTS)
     elif args.category == "text":
         exps = dict(TEXT_EXPERIMENTS)
+    elif args.category == "independence":
+        exps = {k: v() for k, v in INDEPENDENCE_EXPERIMENTS.items()}
+    elif args.category == "separability":
+        exps = {k: v() for k, v in SEPARABILITY_EXPERIMENTS.items()}
+    elif args.category == "capacity":
+        exps = {k: v() for k, v in CAPACITY_EXPERIMENTS.items()}
     else:
         exps = dict(TEXT_EXPERIMENTS)  # 默认文字
 

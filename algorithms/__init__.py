@@ -6,10 +6,8 @@
   2. 实现 encode()
   3. 在这里 import + 加入 ALGOS
 """
-from algorithms.gabor import GaborLift
 from algorithms.template import MyAlgorithm
 
 ALGOS = {
-    "gabor_lift": GaborLift(),
     "random_proj": MyAlgorithm(),
 }

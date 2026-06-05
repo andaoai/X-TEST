@@ -1,18 +1,15 @@
-"""文字实验 —— key = 文件名, 不会冲突"""
-from experiments.text.lang import ExpLangSeparation
-from experiments.text.position import ExpPositionInvariance
-from experiments.text.color import ExpColorSeparation
-from experiments.text.pos_encode import ExpPositionEncoding
-from experiments.text.char import ExpCharSeparation
-from experiments.text.rotation_sep import ExpRotationSeparation
-from experiments.text.rotation_inv import ExpRotationInvariance
+"""文字实验 —— 控制变量实验"""
+from experiments.text.independence import INDEPENDENCE_EXPERIMENTS
+from experiments.text.separability import SEPARABILITY_EXPERIMENTS
+from experiments.text.capacity import CAPACITY_EXPERIMENTS
 
 TEXT_EXPERIMENTS = {
-    "lang":         ExpLangSeparation(),
-    "position":     ExpPositionInvariance(),
-    "color":        ExpColorSeparation(),
-    "pos_encode":   ExpPositionEncoding(),
-    "char":         ExpCharSeparation(),
-    "rotation_sep": ExpRotationSeparation(),
-    "rotation_inv": ExpRotationInvariance(),
+    # 独立性实验
+    **{k: v() for k, v in INDEPENDENCE_EXPERIMENTS.items()},
+
+    # 可分性实验
+    **{k: v() for k, v in SEPARABILITY_EXPERIMENTS.items()},
+
+    # 容量实验
+    **{k: v() for k, v in CAPACITY_EXPERIMENTS.items()},
 }

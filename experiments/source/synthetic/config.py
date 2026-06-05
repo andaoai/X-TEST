@@ -32,6 +32,10 @@ ROTATIONS: dict[str, int] = {
     "0": 0, "90": 90, "180": 180, "270": 270,
 }
 
+FONT_SIZES: dict[str, int] = {
+    "small": 18, "medium": 28, "large": 38,
+}
+
 # 色板
 COLOR_HEX = dict(zip(COLORS.keys(),
     ["#e74c3c","#2ecc71","#3498db","#f1c40f","#1abc9c","#9b59b6","#ecf0f1","#e67e22"]))

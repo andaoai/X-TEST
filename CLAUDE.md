@@ -4,20 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目本质
 
-实验驱动的探索项目。核心问题：**一个 embedding 空间能不能同时表达 mask 的形状、大小、位置、颜色等多种属性？** 目前未知，需要大量实验来验证。
+实验驱动的探索项目。核心问题：**一个 embedding 空间能不能同时表达 mask 的形状、大小、位置、旋转等多种属性？** 目前未知，需要大量实验来验证。
+
+详细实验设计见 `.claude/skills/new-experiment/SKILL.md`。
 
 ## 常用命令
 
 ```bash
 uv sync                                        # 安装依赖
 uv run python run.py --list                     # 列出所有实验
-uv run python run.py                            # 跑全部文字实验 (默认 gabor_lift)
-uv run python run.py --exp color                # 跑单个实验
+uv run python run.py                            # 跑全部文字实验 (默认 random_proj)
+uv run python run.py --exp i_position           # 跑单个实验
+uv run python run.py --category independence    # 跑独立性实验
+uv run python run.py --category separability    # 跑可分性实验
+uv run python run.py --category capacity        # 跑容量实验
 uv run python run.py --category vision          # 跑视觉实验
-uv run python run.py --algo random_proj         # 换算法
+uv run python run.py --algo my_algorithm        # 换算法
 uv run python run.py --no-viz                   # 不生成可视化
 uv run pytest tests/ -v                         # 运行测试
-uv run pytest tests/test_text_experiments.py::TestRunDataFlow::test_text_run_returns_dict[lang] -v  # 跑单个测试
 ```
 
 ## 架构
@@ -34,21 +38,27 @@ uv run pytest tests/test_text_experiments.py::TestRunDataFlow::test_text_run_ret
 - 继承 `BaseAlgorithm`，实现 `encode(inputs) → (N, EMBEDDING_DIM)` L2 归一化向量
 - `uses_rgb` 标记算法需要 RGB 还是只用二值 mask
 - 注册到 `algorithms/__init__.py` 的 `ALGOS` 字典
-- 当前算法：`gabor_lift`（Gabor 滤波器+PCA）、`random_proj`（随机投影）
+- 当前算法：`random_proj`（随机投影）
 - 新算法从 `algorithms/template.py` 复制开始
 
 ### 实验层 (experiments/)
 
+三类控制变量实验（详见 [EXPERIMENTS.md](EXPERIMENTS.md)）：
+- **独立性实验**：测属性变化是否影响 embedding（sim > 0.90 通过）
+- **可分性实验**：测属性是否被编码（separation > 0.05 通过）
+- **容量实验**：测能否同时编码多个属性（sim > 0.80 通过）
+
+实现要求：
 - 继承 `BaseExperiment`，实现五要素：`load_data()`、`hypothesis`、`run()`、`passes_when`、`viz()`
 - `run(emb, labels, sim) → dict` 是核心度量方法，`sim = emb @ emb.T`
 - 返回 dict 必须含 `name`、`metric`、`separation`、`is_correct`、`details`
-- 注册到 `experiments/text/__init__.py` 或 `experiments/vision/__init__.py`
-- 新实验从复制现有实验开始（如 `text/color.py`）
+- 注册到对应目录的 `__init__.py`
+- 通用度量函数在 `experiments/metrics.py`
 
 ### labels 结构
 
 所有实验的 labels 统一格式：`{field_name: {value: [sample_indices]}}`
-- 文字实验字段：`lang`、`color`、`position`、`label`
+- 文字实验字段：`lang`、`color`、`position`、`label`、`rotation`、`size`
 - 视觉实验字段：`x_pos`、`y_pos`、`count`、`single`
 
 ### 关键常量
@@ -65,9 +75,11 @@ uv run pytest tests/test_text_experiments.py::TestRunDataFlow::test_text_run_ret
 
 ## 添加新实验
 
-1. 在 `experiments/text/` 或 `experiments/vision/` 下新建 `.py`
-2. 继承 `BaseExperiment`，实现 `load_data()`、`run()`、`viz()`
-3. 在对应目录的 `__init__.py` 中注册到 `TEXT_EXPERIMENTS` 或 `VISION_EXPERIMENTS`
+1. 确定实验类型：独立性、可分性或容量
+2. 在对应目录下新建 `.py`（如 `experiments/text/independence/`）
+3. 继承 `BaseExperiment`，实现 `load_data()`、`run()`、`viz()`
+4. 使用 `experiments/metrics.py` 中的通用度量函数
+5. 在对应目录的 `__init__.py` 中注册
 
 ## 测试
 
