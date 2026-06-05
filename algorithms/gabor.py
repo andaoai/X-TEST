@@ -76,8 +76,10 @@ class GaborLift(BaseAlgorithm):
                 raw[:, start:start + self.n_orient] = block / (
                     np.linalg.norm(block, axis=1, keepdims=True) + 1e-8)
 
-        # PCA to EMBEDDING_DIM
-        if raw_dim > EMBEDDING_DIM:
+        # 确保输出 EMBEDDING_DIM 维
+        if raw_dim < EMBEDDING_DIM:
+            emb = np.pad(raw, ((0,0),(0,EMBEDDING_DIM - raw_dim)))
+        elif raw_dim > EMBEDDING_DIM:
             X = raw - raw.mean(axis=0)
             _, _, Vt = np.linalg.svd(X, full_matrices=False)
             emb = X @ Vt[:EMBEDDING_DIM].T
