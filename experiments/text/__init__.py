@@ -1,6 +1,4 @@
-"""
-文字实验注册表 —— 每个实验一个文件，包含完整的四要素。
-"""
+"""文字实验"""
 from experiments.text.lang import ExpLangSeparation
 from experiments.text.position import ExpPositionInvariance
 from experiments.text.color import ExpColorSeparation

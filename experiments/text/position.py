@@ -1,33 +1,31 @@
-"""
-实2: 位置不变性
-
-假设: 同一个字符无论放在哪个位置，embedding 应该高度相似。
-"""
+"""Ex2: 位置不变性"""
 import numpy as np
-from pathlib import Path
 from experiments.base import BaseExperiment
 from experiments.viz import tsne_plot
-from experiments.source.synthetic.config import OUTPUT_ROOT, POS_HEX
+from experiments.source.synthetic.config import POS_HEX
+from experiments.source.synthetic.data import Dataset
 
 
 class ExpPositionInvariance(BaseExperiment):
     name = "位置不变性"
-    hypothesis = "同一个字符无论放在哪个位置，embedding 应该高度相似"
-    data_source = "experiments/source/synthetic"
-    what_labels = ["label", "color"]
+    hypothesis = "同一个字符无论放在哪个位置, embedding 应该高度相似"
     passes_when = "mean_similarity > 0.90"
+    uses_rgb = True
+
+    def load_data(self):
+        ds = Dataset().generate(verbose=True)
+        return ds.rgbs(), ds.labels
 
     def run(self, emb, labels, sim):
+        if not self.check_labels(labels, ["label"]): return {}
         all_sims = []
-        for char, idxs in labels["label"].items():
+        for idxs in labels["label"].values():
             arr = np.array(idxs)
             s = sim[arr][:, arr]
-            mask = ~np.eye(len(arr), dtype=bool)
-            all_sims.extend(s[mask].tolist())
+            all_sims.extend(s[~np.eye(len(arr), dtype=bool)].tolist())
         avg = float(np.mean(all_sims))
         return {
-            "name": self.name, "hypothesis": self.hypothesis,
-            "metric": f"sim={avg:.4f}", "separation": avg,
+            "name": self.name, "metric": f"sim={avg:.4f}", "separation": avg,
             "is_correct": avg > 0.90,
             "details": {"mean_sim": avg, "std_sim": float(np.std(all_sims)),
                         "n_pairs": len(all_sims)},
@@ -36,4 +34,4 @@ class ExpPositionInvariance(BaseExperiment):
     def viz(self, emb, labels, result, algo_name, out_dir):
         tsne_plot(emb, labels["position"], POS_HEX,
                   f"Exp2: {self.name} [{algo_name}]",
-                  out_dir / "exp2_position.png", result.get("metric",""))
+                  out_dir/"exp2_position.png", result.get("metric",""))
