@@ -28,6 +28,9 @@ from experiments.text.independence import INDEPENDENCE_EXPERIMENTS
 from experiments.text.separability import SEPARABILITY_EXPERIMENTS
 from experiments.text.capacity import CAPACITY_EXPERIMENTS
 from experiments.vision import VISION_EXPERIMENTS
+from experiments.vision.independence import VISION_INDEPENDENCE_EXPERIMENTS
+from experiments.vision.separability import VISION_SEPARABILITY_EXPERIMENTS
+from experiments.vision.capacity import VISION_CAPACITY_EXPERIMENTS
 from experiments.viz import summary_bar
 
 ALL_EXPERIMENTS = {
@@ -36,6 +39,9 @@ ALL_EXPERIMENTS = {
     **{k: v() for k, v in INDEPENDENCE_EXPERIMENTS.items()},
     **{k: v() for k, v in SEPARABILITY_EXPERIMENTS.items()},
     **{k: v() for k, v in CAPACITY_EXPERIMENTS.items()},
+    **{k: v() for k, v in VISION_INDEPENDENCE_EXPERIMENTS.items()},
+    **{k: v() for k, v in VISION_SEPARABILITY_EXPERIMENTS.items()},
+    **{k: v() for k, v in VISION_CAPACITY_EXPERIMENTS.items()},
 }
 
 
@@ -55,7 +61,8 @@ def parse_args():
     p.add_argument("--exp",  default=None, metavar="NAME",
                    help=f"单实验: {', '.join(ALL_EXPERIMENTS)}")
     p.add_argument("--category", default=None,
-                   choices=["text", "vision", "independence", "separability", "capacity"])
+                   choices=["text", "vision", "independence", "separability", "capacity",
+                            "vi_independence", "vi_separability", "vi_capacity"])
     p.add_argument("--list", action="store_true", help="列出所有实验")
     p.add_argument("--letters", default=None, help="A,B,C (仅文字)")
     p.add_argument("--colors",  default=None, help="Red,Blue (仅文字)")
@@ -90,6 +97,12 @@ def main():
         exps = {k: v() for k, v in SEPARABILITY_EXPERIMENTS.items()}
     elif args.category == "capacity":
         exps = {k: v() for k, v in CAPACITY_EXPERIMENTS.items()}
+    elif args.category == "vi_independence":
+        exps = {k: v() for k, v in VISION_INDEPENDENCE_EXPERIMENTS.items()}
+    elif args.category == "vi_separability":
+        exps = {k: v() for k, v in VISION_SEPARABILITY_EXPERIMENTS.items()}
+    elif args.category == "vi_capacity":
+        exps = {k: v() for k, v in VISION_CAPACITY_EXPERIMENTS.items()}
     else:
         exps = dict(TEXT_EXPERIMENTS)  # 默认文字
 

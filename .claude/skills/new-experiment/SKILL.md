@@ -106,7 +106,9 @@ allowed-tools: Read Write Edit Bash Grep Glob
 
 ## Step 2: 选标签
 
-根据用户的假设，帮他选出需要的数据标签。当前合成数据提供以下标签：
+根据用户的假设，帮他选出需要的数据标签。
+
+### 文字实验标签
 
 | 标签字段 | 可选值 | 例子 |
 |---------|--------|------|
@@ -116,6 +118,22 @@ allowed-tools: Read Write Edit Bash Grep Glob
 | `position` | TL,TR,CT,BL,BR (5个) | 区分位置用这个 |
 | `rotation` | 0,90,180,270 (4个) | 区分旋转角度用这个 |
 | `size` | small,medium,large (3个) | 区分字符大小用这个 |
+
+### 视觉实验标签
+
+**像素实验**：
+| 标签字段 | 可选值 | 例子 |
+|---------|--------|------|
+| `count` | 1pt,2pt,3pt,5pt,10pt | 区分像素数量用这个 |
+| `x_pos` | x=0,x=4,...,x=60 | 区分 x 坐标用这个 |
+| `y_pos` | y=0,y=4,...,y=60 | 区分 y 坐标用这个 |
+
+**线实验**：
+| 标签字段 | 可选值 | 例子 |
+|---------|--------|------|
+| `position` | (x,y) 坐标 | 区分线起点位置用这个 |
+| `rotation` | 0,45,90,135,180,225,270,315 | 区分线角度用这个 |
+| `length` | 15,25,35 | 区分线长度用这个 |
 
 向用户确认：**要用哪几个标签？**（通常 1-2 个）
 
@@ -376,30 +394,60 @@ uv run python run.py --category capacity --no-viz
 
 ## 已有实验参考
 
-### 独立性实验
+### 文字实验
+
+#### 独立性实验
 
 | 实验 | 文件 | 假设 | 固定 | 变化 | 判据 |
 |------|------|------|------|------|------|
-| 位置独立性 | independence/position.py | 位置变化不影响字符表示 | 字符、旋转、大小 | 位置 | sim > 0.90 |
-| 旋转独立性 | independence/rotation.py | 旋转变化不影响字符表示 | 字符、位置、大小 | 旋转 | sim > 0.90 |
-| 大小独立性 | independence/scale.py | 大小变化不影响字符表示 | 字符、位置、旋转 | 大小 | sim > 0.90 |
+| 位置独立性 | text/independence/position.py | 位置变化不影响字符表示 | 字符、旋转、大小 | 位置 | sim > 0.90 |
+| 旋转独立性 | text/independence/rotation.py | 旋转变化不影响字符表示 | 字符、位置、大小 | 旋转 | sim > 0.90 |
+| 大小独立性 | text/independence/scale.py | 大小变化不影响字符表示 | 字符、位置、旋转 | 大小 | sim > 0.90 |
 
-### 可分性实验
+#### 可分性实验
 
 | 实验 | 文件 | 假设 | 固定 | 变化 | 判据 |
 |------|------|------|------|------|------|
-| 字符可分性 | separability/character.py | 字符形状被编码 | 位置、旋转、大小 | 字符 | sep > 0.05 |
-| 位置可分性 | separability/position.py | 位置信息被编码 | 字符、旋转、大小 | 位置 | sep > 0.02 |
-| 旋转可分性 | separability/rotation.py | 旋转角度被编码 | 字符、位置、大小 | 旋转 | sep > 0.05 |
-| 大小可分性 | separability/scale.py | 字符大小被编码 | 字符、位置、旋转 | 大小 | sep > 0.05 |
+| 字符可分性 | text/separability/character.py | 字符形状被编码 | 位置、旋转、大小 | 字符 | sep > 0.05 |
+| 位置可分性 | text/separability/position.py | 位置信息被编码 | 字符、旋转、大小 | 位置 | sep > 0.02 |
+| 旋转可分性 | text/separability/rotation.py | 旋转角度被编码 | 字符、位置、大小 | 旋转 | sep > 0.05 |
+| 大小可分性 | text/separability/scale.py | 字符大小被编码 | 字符、位置、旋转 | 大小 | sep > 0.05 |
 
-### 容量实验
+#### 容量实验
 
 | 实验 | 文件 | 假设 | 分组依据 | 判据 |
 |------|------|------|----------|------|
-| 字符+位置 | capacity/char_pos.py | 能同时编码字符和位置 | (字符, 位置) | sim > 0.85 |
-| 字符+大小 | capacity/char_scale.py | 能同时编码字符和大小 | (字符, 大小) | sim > 0.85 |
-| 全属性 | capacity/full.py | 能同时编码所有属性 | (字符, 位置, 旋转, 大小) | sim > 0.80 |
+| 字符+位置 | text/capacity/char_pos.py | 能同时编码字符和位置 | (字符, 位置) | sim > 0.85 |
+| 字符+大小 | text/capacity/char_scale.py | 能同时编码字符和大小 | (字符, 大小) | sim > 0.85 |
+| 全属性 | text/capacity/full.py | 能同时编码所有属性 | (字符, 位置, 旋转, 大小) | sim > 0.80 |
+
+### 视觉实验
+
+#### 独立性实验
+
+| 实验 | 文件 | 假设 | 固定 | 变化 | 判据 |
+|------|------|------|------|------|------|
+| 像素位置独立性 | vision/independence/pixel_position.py | 位置变化不影响数量表示 | 数量 | 位置 | sim > 0.90 |
+| 线位置独立性 | vision/independence/line_position.py | 位置变化不影响线的表示 | 旋转、长度 | 位置 | sim > 0.90 |
+| 线旋转独立性 | vision/independence/line_rotation.py | 旋转变化不影响线的表示 | 位置、长度 | 旋转 | sim > 0.90 |
+| 线长度独立性 | vision/independence/line_length.py | 长度变化不影响线的表示 | 位置、旋转 | 长度 | sim > 0.90 |
+
+#### 可分性实验
+
+| 实验 | 文件 | 假设 | 固定 | 变化 | 判据 |
+|------|------|------|------|------|------|
+| 像素位置可分性 | vision/separability/pixel_position.py | 位置信息被编码 | 数量 | 位置 | sep > 0.02 |
+| 像素数量可分性 | vision/separability/pixel_count.py | 数量信息被编码 | - | 数量 | sep > 0.03 |
+| 线位置可分性 | vision/separability/line_position.py | 位置信息被编码 | 旋转、长度 | 位置 | sep > 0.02 |
+| 线旋转可分性 | vision/separability/line_rotation.py | 旋转角度被编码 | 位置、长度 | 旋转 | sep > 0.05 |
+| 线长度可分性 | vision/separability/line_length.py | 长度信息被编码 | 位置、旋转 | 长度 | sep > 0.05 |
+
+#### 容量实验
+
+| 实验 | 文件 | 假设 | 分组依据 | 判据 |
+|------|------|------|----------|------|
+| 线位置+旋转 | vision/capacity/line_pos_rot.py | 能同时编码位置和旋转 | (位置, 旋转) | sim > 0.80 |
+| 线全属性 | vision/capacity/line_full.py | 能同时编码所有属性 | (位置, 旋转, 长度) | sim > 0.80 |
 
 ---
 
