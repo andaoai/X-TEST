@@ -28,8 +28,14 @@ POSITIONS: dict[str, tuple] = {
     "TL":(8,8), "TR":(48,8), "CT":(28,28), "BL":(8,48), "BR":(48,48),
 }
 
+ROTATIONS: dict[str, int] = {
+    "0": 0, "90": 90, "180": 180, "270": 270,
+}
+
 # 色板
 COLOR_HEX = dict(zip(COLORS.keys(),
     ["#e74c3c","#2ecc71","#3498db","#f1c40f","#1abc9c","#9b59b6","#ecf0f1","#e67e22"]))
 POS_HEX   = dict(zip(POSITIONS.keys(),
     ["#e74c3c","#3498db","#2ecc71","#9b59b6","#e67e22"]))
+ROTATION_HEX = dict(zip(ROTATIONS.keys(),
+    ["#3498db","#e74c3c","#2ecc71","#e67e22"]))
