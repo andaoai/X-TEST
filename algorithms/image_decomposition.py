@@ -394,14 +394,24 @@ class ColorTokenEncoder(nn.Module):
 
         returns: (B, out_dim) — 完整 token 向量
         """
-        # 颜色:HSV id → one-hot → MLP
+        # 颜色:HSV id → one-hot → MLP(全向量化,无 Python 循环)
         B = hsv_ids.size(0)
-        colors_np = np.stack([hsv_id_to_onehot(int(h), int(s), int(v))
-                              for h, s, v in hsv_ids])   # (B, 46) numpy
-        colors = torch.from_numpy(colors_np).to(masks.device)   # (B, 46) tensor
+        device = masks.device
+        # 构造 46 维拼接 one-hot:
+        #   [0..N_H_BINS)               = H 段(N_H_BINS 维)
+        #   [N_H_BINS..N_H_BINS+N_S)    = S 段(N_S_BINS 维)
+        #   [N_H_BINS+N_S..46)          = V 段(N_V_BINS 维)
+        colors = torch.zeros(B, COLOR_ONEHOT_DIM, device=device)
+        h, s, v = hsv_ids[:, 0], hsv_ids[:, 1], hsv_ids[:, 2]
+        # H 段
+        colors[torch.arange(B, device=device), h] = 1.0
+        # S 段
+        colors[torch.arange(B, device=device), N_H_BINS + s] = 1.0
+        # V 段
+        colors[torch.arange(B, device=device), N_H_BINS + N_S_BINS + v] = 1.0
         c = self.color_enc(colors)                              # (B, geom_dim)
         # 几何:mask → CNN
-        g = self.mask_enc(masks)                          # (B, geom_dim)
+        g = self.mask_enc(masks)                                # (B, geom_dim)
         # 融合
         if self.fuse_mode == "concat":
             return self.fuse(torch.cat([g, c], dim=-1))
