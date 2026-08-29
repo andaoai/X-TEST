@@ -135,33 +135,25 @@ def main():
     all_letters = sorted(set(t["char"] for s in ds.samples for t in s["tokens"]))
     letter_to_int = {c: i for i, c in enumerate(all_letters)}
     n_letters = len(all_letters)
-    y_first = np.array([letter_to_int[s["tokens"][0]["char"]] for s in ds.samples], dtype=np.int64)
-    y_last = np.array([letter_to_int[s["tokens"][-1]["char"]] for s in ds.samples], dtype=np.int64)
+    print(f"  字典: words={n_words} lengths={n_lengths} letters={n_letters}")
     print(f"  字典: words={n_words} lengths={n_lengths} letters={n_letters}")
 
-    print("\n[2/4] 构建模型 + 5 头 (共享 emb + 各自投影 MLP)...")
+    print("\n[2/4] 构建模型 + 3 头 (共享 emb + 各自投影 MLP)...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     algo = ALGOS["color_tokens"]
     algo._build(device)
 
     # ── 共享中间 embedding ──
     # 整图类任务:pool 97-d → shared_emb 64-d (1 Linear + ReLU)
-    #  token 类任务:first/last 32-d token → shared_tok 32-d (1 Linear + ReLU)
     SHARED_DIM_IMG = 64
-    SHARED_DIM_TOK = 32
 
     torch.manual_seed(42)
     shared_img = nn.Sequential(
         nn.Linear(POOL_IN_DIM, SHARED_DIM_IMG),
         nn.ReLU(),
     ).to(device)
-    torch.manual_seed(42)
-    shared_tok = nn.Sequential(
-        nn.Linear(TOKEN_GEOM_DIM, SHARED_DIM_TOK),
-        nn.ReLU(),
-    ).to(device)
 
-    # ── 5 个投影头:shared → 各自 32-d 判别空间 → 分类 ──
+    # ── 3 个投影头:shared → 各自 32-d 判别空间 → 分类 ──
     PROJ_DIM = 32
 
     def make_head(in_dim, n_classes):
@@ -175,11 +167,9 @@ def main():
     head_word_match = make_head(SHARED_DIM_IMG, 2)
     head_word_id = make_head(SHARED_DIM_IMG, n_words)
     head_length = make_head(SHARED_DIM_IMG, n_lengths)
-    head_first = make_head(SHARED_DIM_TOK, n_letters)
-    head_last = make_head(SHARED_DIM_TOK, n_letters)
 
-    print(f"  shared_img: {POOL_IN_DIM}→{SHARED_DIM_IMG}  shared_tok: {TOKEN_GEOM_DIM}→{SHARED_DIM_TOK}")
-    print(f"  5 heads: shared → 32-d 投影 → 分类 (word_match=2 word_id={n_words} length={n_lengths} first/last={n_letters})")
+    print(f"  shared_img: {POOL_IN_DIM}→{SHARED_DIM_IMG}")
+    print(f"  3 heads: shared → 32-d 投影 → 分类 (word_match=2 word_id={n_words} length={n_lengths})")
 
     params = (list(algo.encoder.parameters()) +
               list(algo.geom_mlp.parameters()) +
@@ -189,48 +179,36 @@ def main():
               list(algo.emb_head.parameters()) +
               list(algo.cls_trunk.parameters()) +
               list(shared_img.parameters()) +
-              list(shared_tok.parameters()) +
               list(head_word_match.parameters()) +
               list(head_word_id.parameters()) +
-              list(head_length.parameters()) +
-              list(head_first.parameters()) +
-              list(head_last.parameters()))
+              list(head_length.parameters()))
     opt = torch.optim.Adam(params, lr=args.lr)
     loss_fn = nn.CrossEntropyLoss()
 
     print(f"\n[3/4] 训练 {args.epochs} epoch ...")
     algo.train_all()
-    shared_img.train(); shared_tok.train()
-    for h in (head_word_match, head_word_id, head_length, head_first, head_last):
+    shared_img.train()
+    for h in (head_word_match, head_word_id, head_length):
         h.train()
     train_t0 = time.time()
 
     for epoch in range(args.epochs):
         perm = np.random.permutation(N)
         sum_loss = 0.0
-        correct = {k: 0 for k in ["word_match", "word_id", "length", "first", "last"]}
-        counts = {k: 0 for k in ["word_match", "word_id", "length", "first", "last"]}
+        correct = {k: 0 for k in ["word_match", "word_id", "length"]}
+        counts = {k: 0 for k in ["word_match", "word_id", "length"]}
 
         for i in perm:
             tok_attn, pool, _, _ = _encode_with_full(algo, rgbs[i], device)
-            n_fg = tok_attn.size(0) - 1
-
-            first_tok = tok_attn[1] if n_fg > 0 else None
-            last_tok = tok_attn[-1] if n_fg > 0 else None
+            K = tok_attn.size(0)  # K = 1 (BG) + n_letters 前景
 
             # ── 共享 embedding ──
             shared_img_emb = shared_img(pool)               # (64,)
-            shared_tok_emb = None
-            if first_tok is not None:
-                shared_tok_emb = shared_tok(first_tok)      # (32,) for first
-                shared_tok_emb_last = shared_tok(last_tok)  # (32,) for last
-            else:
-                shared_tok_emb_last = None
 
             opt.zero_grad()
             loss = torch.tensor(0.0, device=device)
 
-            # 3 个整图任务
+            # 3 个整图任务(per-token 任务已删:token 顺序自由,不绑 ground truth)
             img_tasks = [
                 (head_word_match, "word_match", y_wm[i]),
                 (head_word_id, "word_id", y_word[i]),
@@ -245,20 +223,6 @@ def main():
                     correct[key] += 1
                 counts[key] += 1
 
-            # 2 个 token 任务(仅 valid)
-            if y_is_valid[i] and shared_tok_emb is not None and n_fg > 0:
-                lf = loss_fn(head_first(shared_tok_emb).unsqueeze(0),
-                             torch.tensor([y_first[i]], device=device))
-                ll = loss_fn(head_last(shared_tok_emb_last).unsqueeze(0),
-                             torch.tensor([y_last[i]], device=device))
-                loss = loss + 0.5 * lf + 0.5 * ll
-                if head_first(shared_tok_emb).argmax().item() == y_first[i]:
-                    correct["first"] += 1
-                counts["first"] += 1
-                if head_last(shared_tok_emb_last).argmax().item() == y_last[i]:
-                    correct["last"] += 1
-                counts["last"] += 1
-
             loss.backward()
             opt.step()
             sum_loss += loss.item()
@@ -268,25 +232,23 @@ def main():
         elapsed = time.time() - train_t0
         msg = (f"  ep{epoch+1:>2}/{args.epochs}  loss={avg_loss:.3f}  "
                f"wm={acc['word_match']:.1%}  wid={acc['word_id']:.1%}  "
-               f"len={acc['length']:.1%}  first={acc['first']:.1%}  "
-               f"last={acc['last']:.1%}  ({elapsed:.0f}s)")
+               f"len={acc['length']:.1%}  ({elapsed:.0f}s)")
         with open(log_path, "a") as f:
             f.write(msg + "\n")
         if (epoch + 1) % 3 == 0 or epoch == 0:
             print(msg, flush=True)
 
-    print("\n[4/4] 收集 embedding + 5 个投影空间 + 画 4 张图 ...")
+    print("\n[4/4] 收集 embedding + 3 个投影空间 + 画 4 张图 ...")
     algo.eval_all()
-    shared_img.eval(); shared_tok.eval()
-    for h in (head_word_match, head_word_id, head_length, head_first, head_last):
+    shared_img.eval()
+    for h in (head_word_match, head_word_id, head_length):
         h.eval()
 
-    all_attn, all_tok, all_bg_tok, all_pool, all_shared_img = [], [], [], [], []
+    all_attn, all_tok, all_pool, all_shared_img = [], [], [], []
     proj_wm, proj_wid, proj_len = [], [], []
-    proj_first, proj_last = [], []
     all_modes, all_lens, all_wms = [], [], []
-    fg_vecs_list, fg_chars_list, fg_pos_list = [], [], []
-    valid_indices = []  # 仅 valid 样本,first/last 投影只对这些算
+    fg_vecs_list, fg_chars_list, fg_pos_list = [], [], []  # 所有 K 个 token(无 BG),含位置 j in K
+    t0_lens_list = []  # token 0(常是空间最靠前连通域)对应的词长
     word_id_pred = np.zeros(N, dtype=np.int64)
     with torch.no_grad():
         for i in range(N):
@@ -302,43 +264,30 @@ def main():
             chars = [t["char"] for t in ds.samples[i]["tokens"]]
             n_letters = len(chars)
             K = t_np.shape[0]
-            n_fg = K - 1 if K > n_letters else K
-            fg_chars = (chars + ["?"] * n_fg)[:n_fg]
-            if K > n_letters:
-                fg_t = t_np[1:1 + n_fg]
-            else:
-                fg_t = t_np[:n_fg]
-            for j in range(n_fg):
-                fg_vecs_list.append(fg_t[j])
-                fg_chars_list.append(fg_chars[j])
+            # K = 1 (BG) + n_letters (前景按 word 顺序;有 char_hints 保证)
+            # 收集所有 K 个 token;位置 0 = BG(标 "BG"),位置 1..K-1 = 前景字符
+            for j in range(K):
+                fg_vecs_list.append(t_np[j])
+                if j == 0:
+                    fg_chars_list.append("BG")
+                else:
+                    fg_chars_list.append(chars[j - 1] if j - 1 < n_letters else "?")
                 fg_pos_list.append(j)
-            if K > n_letters:
-                all_bg_tok.append(t_np[0])
 
             # 共享 embedding + 各任务 32-d 投影空间
             shared_img_emb = shared_img(pool)             # (64,)
             all_shared_img.append(shared_img_emb.cpu().numpy())
-            proj_wm.append(head_word_match[0](shared_img_emb).cpu().numpy())  # 第 0 层 Linear
+            proj_wm.append(head_word_match[0](shared_img_emb).cpu().numpy())
             proj_wid.append(head_word_id[0](shared_img_emb).cpu().numpy())
             proj_len.append(head_length[0](shared_img_emb).cpu().numpy())
 
-            if ds.samples[i]["word_match"] and n_fg > 0:
-                first_t = tok_attn[1]              # spatial 模式第 0 个前景 token
-                last_t = tok_attn[1 + n_fg - 1] if (1 + n_fg - 1) < K else tok_attn[K - 1]
-                shared_t_first = shared_tok(first_t)
-                shared_t_last = shared_tok(last_t)
-                proj_first.append(head_first[0](shared_t_first).cpu().numpy())
-                proj_last.append(head_last[0](shared_t_last).cpu().numpy())
-                valid_indices.append(i)
-
+            t0_lens_list.append(len(ds.samples[i]["target_word"]) if K > 0 else 0)
             word_id_pred[i] = int(head_word_id(shared_img_emb).argmax().item())
     all_pool = np.stack(all_pool)
     all_shared_img = np.stack(all_shared_img)
     proj_wm = np.stack(proj_wm)
     proj_wid = np.stack(proj_wid)
     proj_len = np.stack(proj_len)
-    proj_first = np.stack(proj_first) if proj_first else np.zeros((0, PROJ_DIM), np.float32)
-    proj_last = np.stack(proj_last) if proj_last else np.zeros((0, PROJ_DIM), np.float32)
     fg_vecs = np.stack(fg_vecs_list) if fg_vecs_list else np.zeros((0, TOKEN_GEOM_DIM), np.float32)
     fg_chars_arr = np.array(fg_chars_list)
     fg_pos_arr = np.array(fg_pos_list)
@@ -362,10 +311,8 @@ def main():
             K = attn.shape[0]
             # K 不一定等于 n_letters+1(可能有碎裂),统一按 K 切
             chars = [t["char"] for t in ds.samples[idx]["tokens"]]
-            # 取 K-1 个前景字符,不够补 '?'
-            fg_chars = (chars + ["?"] * (K - 1))[:K - 1]
-            labels = ["BG"] + fg_chars
-            labels = labels[:K]
+            # K 个 token,无 BG 特例;不够补 '?'
+            labels = (chars + ["?"] * K)[:K]
             im = ax.imshow(attn, cmap=cmap, vmin=0, vmax=max(attn.max(), 1e-6))
             ax.set_xticks(range(K))
             ax.set_xticklabels(labels, fontsize=8)
@@ -392,9 +339,8 @@ def main():
 
     # ── 图 2: embedding_layers_pca.png ──
     print("  - 画 embedding_layers_pca.png ...")
-    bg_vecs = np.stack(all_bg_tok) if all_bg_tok else np.zeros((1, TOKEN_GEOM_DIM), np.float32)
     fg_chars = fg_chars_arr
-    fg_pos = fg_pos_arr
+    fg_pos = fg_pos_arr   # token 在自己 K 中的位置 0..K-1
     all_lens_arr = np.array(all_lens)
     all_wms_arr = np.array(all_wms)
 
@@ -418,49 +364,43 @@ def main():
         axes[0, 0].text(0.5, 0.5, "无前景 token", ha="center", va="center")
         axes[0, 0].set_xticks([]); axes[0, 0].set_yticks([])
 
-    # b) 按词内位置
+    # b) 按 token 在 K 中的位置(0..K-1,无 BG 偏移)
     ax = axes[0, 1]
     if len(fg_vecs) > 1:
         for p in sorted(set(fg_pos)):
             m = fg_pos == p
             ax.scatter(xy[m, 0], xy[m, 1], color=plt.get_cmap("tab10")(p % 10 / 10),
-                       s=8, alpha=0.6, edgecolors="none", label=f"pos {p}")
-    ax.set_title("前景 token · 按词内位置着色", fontsize=10)
+                       s=10, alpha=0.7, edgecolors="none", label=f"pos {p}")
+    ax.set_title(f"所有 token · 按 in-K 位置 ({len(fg_vecs)} tokens)", fontsize=10)
     ax.set_xticks([]); ax.set_yticks([])
     ax.legend(fontsize=7, loc="best", framealpha=0.7)
 
-    # c) 背景 token 按词长
+    # c) token 0(常是空间最靠前连通域)按词长
     ax = axes[0, 2]
-    if len(bg_vecs) > 1:
-        xy_bg = _safe_pca(bg_vecs, 2)
-        bg_lens_list = []
-        for i, s in enumerate(ds.samples):
-            t = all_tok[i]
-            n_fg = len(s["tokens"])
-            if t.shape[0] > n_fg:
-                bg_lens_list.append(len(s["target_word"]))
-        bg_lens = np.array(bg_lens_list[:len(bg_vecs)])
-        for L in sorted(set(bg_lens)):
-            m = bg_lens == L
-            ax.scatter(xy_bg[m, 0], xy_bg[m, 1],
+    m_t0 = fg_pos == 0
+    if m_t0.any() and len(t0_lens_list) == N:
+        t0_vecs = fg_vecs[m_t0]
+        xy_t0 = _safe_pca(t0_vecs, 2)
+        t0_lens = np.array(t0_lens_list)
+        for L in sorted(set(t0_lens)):
+            ml = t0_lens == L
+            ax.scatter(xy_t0[ml, 0], xy_t0[ml, 1],
                        color=plt.get_cmap("tab10")(L % 10 / 10), s=10,
                        alpha=0.6, edgecolors="none", label=f"L={L}")
-    ax.set_title(f"背景 token · 按词长 ({len(bg_vecs)} bg tokens)", fontsize=10)
+    ax.set_title(f"token 0 · 按词长 ({int(m_t0.sum())} t0 tokens)", fontsize=10)
     ax.set_xticks([]); ax.set_yticks([])
     ax.legend(fontsize=7, loc="best", framealpha=0.7)
 
-    # d) 前景 vs 背景
+    # d) token 0 vs 其他 token(观察位置 0 是否独立成簇)
     ax = axes[0, 3]
-    if len(fg_vecs) > 0 and len(bg_vecs) > 0:
-        all_v = np.concatenate([fg_vecs, bg_vecs])
-        is_bg = np.concatenate([np.zeros(len(fg_vecs), dtype=bool),
-                                np.ones(len(bg_vecs), dtype=bool)])
-        xy_all = _safe_pca(all_v, 2)
-        ax.scatter(xy_all[~is_bg, 0], xy_all[~is_bg, 1], color="#3b82f6", s=5,
-                   alpha=0.4, edgecolors="none", label="前景")
-        ax.scatter(xy_all[is_bg, 0], xy_all[is_bg, 1], color="#ef4444", s=12,
-                   alpha=0.8, edgecolors="black", linewidths=0.3, label="背景")
-    ax.set_title("前景 vs 背景 token", fontsize=10)
+    if len(fg_vecs) > 0:
+        m_t0 = fg_pos == 0
+        xy_all = _safe_pca(fg_vecs, 2)
+        ax.scatter(xy_all[~m_t0, 0], xy_all[~m_t0, 1], color="#3b82f6", s=5,
+                   alpha=0.4, edgecolors="none", label="pos>0")
+        ax.scatter(xy_all[m_t0, 0], xy_all[m_t0, 1], color="#ef4444", s=12,
+                   alpha=0.8, edgecolors="black", linewidths=0.3, label="pos=0")
+    ax.set_title("token 位置 0 vs 其他(无 BG 特例)", fontsize=10)
     ax.set_xticks([]); ax.set_yticks([])
     ax.legend(fontsize=8, loc="best", framealpha=0.8)
 
@@ -549,9 +489,7 @@ def main():
                 attn = all_attn[idx]
                 K = attn.shape[0]
                 chars = [t["char"] for t in ds.samples[idx]["tokens"]]
-                fg_chars = (chars + ["?"] * (K - 1))[:K - 1]
-                labels = ["BG"] + fg_chars
-                labels = labels[:K]
+                labels = (chars + ["?"] * K)[:K]
                 im = ax.imshow(attn, cmap=cmap, vmin=0, vmax=max(attn.max(), 1e-6))
                 ax.set_xticks(range(K))
                 ax.set_xticklabels(labels, fontsize=8)
@@ -596,10 +534,11 @@ def main():
 
     # ── 图 5: 5 个分类头的 32-d 投影空间(共享中间 embedding 之后) ──
     print("  - 画 projection_spaces.png ...")
-    fig, axes = plt.subplots(2, 3, figsize=(17, 9.5))
+    fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+    axes_flat = axes.flatten()
 
     # 1) word_match 投影 (32-d) - 整图 shared
-    ax = axes[0, 0]
+    ax = axes_flat[0]
     xy = _safe_pca(proj_wm, 2)
     for v, col_v, lab in [(0, "#ef4444", "invalid"), (1, "#10b981", "valid")]:
         m = all_wms_arr == v
@@ -610,7 +549,7 @@ def main():
     ax.legend(fontsize=8, framealpha=0.8)
 
     # 2) word_id 投影 (32-d) - valid only, 按 word
-    ax = axes[0, 1]
+    ax = axes_flat[1]
     valid_idx = np.where(all_wms_arr == 1)[0]
     xy = _safe_pca(proj_wid, 2)
     if len(valid_idx) > 0:
@@ -626,7 +565,7 @@ def main():
     ax.set_xticks([]); ax.set_yticks([])
 
     # 3) length 投影 (32-d) - 按词长
-    ax = axes[0, 2]
+    ax = axes_flat[2]
     xy = _safe_pca(proj_len, 2)
     for L in sorted(set(all_lens_arr)):
         m = all_lens_arr == L
@@ -637,40 +576,8 @@ def main():
     ax.set_xticks([]); ax.set_yticks([])
     ax.legend(fontsize=8, framealpha=0.8)
 
-    # 4) first_letter 投影 (32-d) - valid only, 按首字母
-    ax = axes[1, 0]
-    if len(proj_first) > 0:
-        xy = _safe_pca(proj_first, 2)
-        first_chars = np.array([ds.samples[i]["target_word"][0] for i in valid_indices])
-        uniq = sorted(set(first_chars))
-        cmap20 = plt.get_cmap("tab20")
-        for c in uniq:
-            m = first_chars == c
-            ax.scatter(xy[m, 0], xy[m, 1], color=cmap20(hash(c) % 20 / 20),
-                       s=18, alpha=0.7, edgecolors="none", label=c)
-    ax.set_title(f"first_letter 投影(32-d)· {len(proj_first)} valid", fontsize=10)
-    ax.set_xticks([]); ax.set_yticks([])
-    if len(uniq) <= 30:
-        ax.legend(fontsize=6, loc="best", ncol=2, framealpha=0.7, markerscale=1.2)
-
-    # 5) last_letter 投影 (32-d) - valid only, 按末字母
-    ax = axes[1, 1]
-    if len(proj_last) > 0:
-        xy = _safe_pca(proj_last, 2)
-        last_chars = np.array([ds.samples[i]["target_word"][-1] for i in valid_indices])
-        uniq = sorted(set(last_chars))
-        cmap20 = plt.get_cmap("tab20")
-        for c in uniq:
-            m = last_chars == c
-            ax.scatter(xy[m, 0], xy[m, 1], color=cmap20(hash(c) % 20 / 20),
-                       s=18, alpha=0.7, edgecolors="none", label=c)
-    ax.set_title(f"last_letter 投影(32-d)· {len(proj_last)} valid", fontsize=10)
-    ax.set_xticks([]); ax.set_yticks([])
-    if len(uniq) <= 30:
-        ax.legend(fontsize=6, loc="best", ncol=2, framealpha=0.7, markerscale=1.2)
-
-    # 6) 共享中间 embedding 64-d - 整体 sanity 看
-    ax = axes[1, 2]
+    # 4) 共享中间 embedding 64-d - 整体 sanity 看
+    ax = axes_flat[3]
     xy = _safe_pca(all_shared_img, 2)
     for L in sorted(set(all_lens_arr)):
         m = all_lens_arr == L
@@ -681,7 +588,7 @@ def main():
     ax.set_xticks([]); ax.set_yticks([])
     ax.legend(fontsize=8, framealpha=0.8)
 
-    fig.suptitle("5 个分类头的 32-d 投影空间 + 共享 64-d 参考\n"
+    fig.suptitle("3 个分类头的 32-d 投影空间 + 共享 64-d 参考\n"
                  "shared → head[0](Linear) → 32-d 投影(分类前最后一层)",
                  fontsize=12, fontweight="bold", y=1.005)
     plt.tight_layout()
@@ -689,7 +596,7 @@ def main():
     plt.close()
 
     print(f"\n  最终精度: wm={acc['word_match']:.1%}  wid={acc['word_id']:.1%}  "
-          f"len={acc['length']:.1%}  first={acc['first']:.1%}  last={acc['last']:.1%}")
+          f"len={acc['length']:.1%}")
     print(f"\n  ✓ 全部输出: {out_dir}/")
     for f in sorted(out_dir.iterdir()):
         print(f"    - {f.name}")

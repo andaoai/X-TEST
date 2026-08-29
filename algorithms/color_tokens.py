@@ -3,7 +3,7 @@
 
 架构(类比 NLP):
   inputs (N, H, W) 或 (N, H, W, 3)
-    ↓ 提升到 RGB + HSV 桶量化(背景也算 token)
+    ↓ 提升到 RGB + HSV 桶量化(全部像素 → 空间连通域 = K 个 token,无 bg/fg 区分)
   K tokens per sample, each = (hsv_id_tuple, mask)        ← 类比"词"
     ↓ mask 过小 CNN → geom(32-d)  → geom_mlp(32-d)
     ↓ hsv_id → [onehot_H ⊕ onehot_S ⊕ onehot_V] = 46-d → color_mlp(46→64→32)
@@ -48,22 +48,23 @@ CLS_TRUNK_HIDDEN = 64
 N_ATTN_HEADS = 4
 
 
-def _hsv_decompose(rgb: np.ndarray, mode: str = "bucket"):
+def _hsv_decompose(rgb: np.ndarray, mode: str = "bucket", char_hints: list = None):
     """
     rgb: (H, W, 3) float32 ∈ [0, 1]
-
-    mode="bucket"  : 按 (h_id, s_id, v_id) 三元组细粒度分桶,K 可能 1-20+
-                     (单字母合成数据,边缘抗锯齿会被细分)
-    mode="spatial" : 前景像素先按 HSV 桶粗归一得 mask,再对**前景 mask 做连通域**,
-                     K = 连通域数 + 背景。
-                     适合"连续色块"图(单词数据集渲染的就是连续色块字母,
-                     三个字母水平摆放,空间不连通)
+    mode:
+      "bucket"  - 按 (h_id, s_id, v_id) 三元组细粒度分桶,K 可能 1-20+
+      "spatial" - 前景做空间连通域(每个连通域 = 一个前景 token),
+                   黑色背景作为**一个独立 token** 放在最前。
+    char_hints: 可选。word 渲染时的字符序列 ["g", "o"] 等,用于把前景 token
+                按空间位置(质心 x)排序成 word 字符顺序。
+                None 时前景按 spatial 扫描顺序。
 
     returns:
         tokens: list of (hsv_id_tuple, mask)
             hsv_id_tuple: (h_id, s_id, v_id) 各 int
             mask:         (H, W) float32 二值
-        bg_mask: (H, W) bool
+            **位置 0 = 背景 token**(若存在);位置 1..K-1 = 前景(按 word 顺序或扫描序)
+        bg_mask: (H, W) bool(对外参考用)
     """
     h, w, _ = rgb.shape
     rgb_u8 = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
@@ -73,45 +74,56 @@ def _hsv_decompose(rgb: np.ndarray, mode: str = "bucket"):
     S_ch = hsv[:, :, 1]
     V_ch = hsv[:, :, 2]
 
-    bg_mask = V_ch < _BG_V_THRESHOLD
-    fg_pixels = ~bg_mask
-
+    is_colored = (V_ch >= _BG_V_THRESHOLD) | (S_ch >= _BG_V_THRESHOLD)
     h_id = (H_ch // H_BIN_SIZE).astype(np.int32)
     s_id = np.minimum(S_ch // SV_BIN_SIZE, N_S_BINS - 1).astype(np.int32)
     v_id = np.minimum(V_ch // SV_BIN_SIZE, N_V_BINS - 1).astype(np.int32)
 
+    bg_mask = V_ch < _BG_V_THRESHOLD
     tokens = []
 
+    # 背景 token(若存在)
     if bg_mask.sum() > _MIN_MASK_PIXELS:
-        bg_h = int(h_id[bg_mask].mean())
-        bg_s = int(s_id[bg_mask].mean())
-        bg_v = int(v_id[bg_mask].mean())
-        tokens.append(((bg_h, bg_s, bg_v), bg_mask.astype(np.float32)))
+        bh = int(h_id[bg_mask].mean())
+        bs = int(s_id[bg_mask].mean())
+        bv = int(v_id[bg_mask].mean())
+        tokens.append(((bh, bs, bv), bg_mask.astype(np.float32)))
 
-    if fg_pixels.sum() > _MIN_MASK_PIXELS:
-        if mode == "spatial":
-            # 连通域:对前景像素做 connected components
-            from scipy import ndimage
-            fg_u8 = fg_pixels.astype(np.uint8)
-            labeled, n_comp = ndimage.label(fg_u8, structure=np.ones((3, 3)))
-            for comp_id in range(1, n_comp + 1):
-                m = (labeled == comp_id)
-                if m.sum() > _MIN_MASK_PIXELS:
-                    hi = int(h_id[m].mean())
-                    si = int(s_id[m].mean())
-                    vi = int(v_id[m].mean())
-                    tokens.append(((hi, si, vi), m.astype(np.float32)))
-        else:
-            # bucket 模式(原版):按 HSV 桶细粒度分,抗锯齿可能 K=10+
-            bucket = h_id * (N_S_BINS * N_V_BINS) + s_id * N_V_BINS + v_id
-            fg_buckets = np.unique(bucket[fg_pixels])
-            for b in fg_buckets:
-                m = (bucket == b) & fg_pixels
-                if m.sum() > _MIN_MASK_PIXELS:
-                    hi = int(h_id[m].mean())
-                    si = int(s_id[m].mean())
-                    vi = int(v_id[m].mean())
-                    tokens.append(((hi, si, vi), m.astype(np.float32)))
+    if mode == "spatial":
+        # 前景连通域
+        from scipy import ndimage
+        fg_u8 = is_colored.astype(np.uint8)
+        labeled, n_comp = ndimage.label(fg_u8, structure=np.ones((3, 3)))
+        fg_tokens = []
+        for comp_id in range(1, n_comp + 1):
+            m = (labeled == comp_id)
+            if m.sum() > _MIN_MASK_PIXELS:
+                hi = int(h_id[m].mean())
+                si = int(s_id[m].mean())
+                vi = int(v_id[m].mean())
+                fg_tokens.append(((hi, si, vi), m.astype(np.float32)))
+
+        if char_hints and len(char_hints) == len(fg_tokens):
+            # 按质心 x 排序(单词是从左到右),让 token 顺序 = word 字符顺序
+            centroids = []
+            for _, m in fg_tokens:
+                ys, xs = np.where(m > 0.5)
+                centroids.append(xs.mean() if len(xs) else 0.0)
+            order = np.argsort(centroids)
+            fg_tokens = [fg_tokens[i] for i in order]
+        # 不传 char_hints 就保持扫描顺序(等同 v5 行为)
+        tokens.extend(fg_tokens)
+    else:
+        # bucket 模式:按 HSV 桶细粒度分
+        bucket = h_id * (N_S_BINS * N_V_BINS) + s_id * N_V_BINS + v_id
+        fg_buckets = np.unique(bucket[is_colored])
+        for b in fg_buckets:
+            m = (bucket == b) & is_colored
+            if m.sum() > _MIN_MASK_PIXELS:
+                hi = int(h_id[m].mean())
+                si = int(s_id[m].mean())
+                vi = int(v_id[m].mean())
+                tokens.append(((hi, si, vi), m.astype(np.float32)))
 
     if not tokens:
         tokens.append(((0, 0, 0), np.zeros((h, w), np.float32)))
