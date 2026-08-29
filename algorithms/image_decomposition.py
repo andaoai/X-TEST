@@ -261,6 +261,198 @@ def hsv_id_to_onehot(h_id: int, s_id: int, v_id: int) -> np.ndarray:
     return v
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# 附加层:颜色感知 token 编码器(端到端可学习)
+# ─────────────────────────────────────────────────────────────────────────
+# 上面的 decompose_* 是确定性分解,这里追加一层"可学习编码",把
+# (hsv_id, mask) → 32-d 向量 token,供下游分类/聚类/检索。
+#
+# 关键设计:多种 fuse_mode 可选,适应不同任务:
+#   - "concat"    geom ⊕ color → Linear → out_dim
+#                 最简单,最通用,默认
+#   - "add"       geom + color_mlp
+#                 假设 geom 和 color 在同一语义空间(参数少,快)
+#   - "gate"      geom * sigmoid(color_gate)
+#                 颜色"调制"几何 — "红 mask" 和 "蓝 mask" 表现不同
+#                 颜色敏感任务推荐
+#   - "bilinear"  geom ⊗ color 外积 → Linear → out_dim
+#                 高阶交互,参数最多,样本少时易过拟合,但表达力最强
+#
+# 训练策略:跟下游任务 loss 一起端到端训练。encoder.parameters() 加进 optimizer 即可。
+
+
+class _MaskEncoder(nn.Module):
+    """单 mask → geom_dim 维几何向量(小 CNN)。"""
+
+    def __init__(self, geom_dim: int = 32):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 16, 3, stride=2, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, 3, stride=2, padding=1)
+        self.fc = nn.Linear(32, geom_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 1, H, W) ∈ [0, 1]
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = x.mean(dim=(2, 3))
+        x = self.fc(x)
+        return x   # (B, geom_dim),不归一化 — 留给 fuse 决定
+
+
+class _ColorMLP(nn.Module):
+    """46 维 HSV one-hot → color_dim 维颜色向量。"""
+
+    def __init__(self, in_dim: int = COLOR_ONEHOT_DIM, hidden: int = 64,
+                 out_dim: int = 32):
+        super().__init__()
+        self.fc1 = nn.Linear(in_dim, hidden)
+        self.fc2 = nn.Linear(hidden, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, 46)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x   # (B, color_dim)
+
+
+class _BilinearFusion(nn.Module):
+    """外积融合:geom ⊗ color → Linear → out_dim"""
+
+    def __init__(self, geom_dim: int, color_dim: int, out_dim: int):
+        super().__init__()
+        self.fc = nn.Linear(geom_dim * color_dim, out_dim)
+
+    def forward(self, g: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        # g: (B, G), c: (B, C) → outer → (B, G*C) → linear → (B, out_dim)
+        outer = g.unsqueeze(-1) * c.unsqueeze(-2)   # (B, G, C)
+        return self.fc(outer.flatten(1))              # (B, out_dim)
+
+
+class _GateFusion(nn.Module):
+    """门控融合:geom * sigmoid(color_gate_proj(color))"""
+
+    def __init__(self, color_dim: int, geom_dim: int):
+        super().__init__()
+        self.gate = nn.Linear(color_dim, geom_dim)
+
+    def forward(self, g: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+        # g: (B, G), c: (B, C) → (B, G) * (B, G) → (B, G)
+        return g * torch.sigmoid(self.gate(c))
+
+
+class ColorTokenEncoder(nn.Module):
+    """
+    把 (hsv_id, mask) 对编码成 out_dim 维 token 向量(端到端可学习)。
+
+    多种 fuse_mode 适应不同任务:
+      "concat" / "add" / "gate" / "bilinear"
+    详细说明见模块顶部 docstring。
+
+    用法:
+        enc = ColorTokenEncoder(fuse_mode="gate")    # 颜色敏感任务
+        enc.to(device).train()
+        # 跟下游 head 一起放进 optimizer:
+        #   opt = torch.optim.Adam(list(enc.parameters()) + list(head.parameters()))
+    """
+
+    FUSE_MODES = ("concat", "add", "gate", "bilinear")
+
+    def __init__(self,
+                 geom_dim: int = 32,
+                 color_in: int = COLOR_ONEHOT_DIM,
+                 out_dim: int = 32,
+                 fuse_mode: str = "concat"):
+        super().__init__()
+        assert fuse_mode in self.FUSE_MODES, \
+            f"fuse_mode 必须是 {self.FUSE_MODES},得到 {fuse_mode!r}"
+        self.fuse_mode = fuse_mode
+        self.geom_dim = geom_dim
+        self.out_dim = out_dim
+
+        self.mask_enc = _MaskEncoder(geom_dim)
+        self.color_enc = _ColorMLP(color_in, hidden=64, out_dim=geom_dim)
+
+        if fuse_mode == "concat":
+            self.fuse = nn.Linear(2 * geom_dim, out_dim)
+        elif fuse_mode == "add":
+            self.fuse = nn.Identity()
+        elif fuse_mode == "gate":
+            self.fuse = _GateFusion(color_dim=geom_dim, geom_dim=geom_dim)
+        elif fuse_mode == "bilinear":
+            self.fuse = _BilinearFusion(geom_dim=geom_dim, color_dim=geom_dim,
+                                        out_dim=out_dim)
+
+    def forward(self, hsv_ids: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
+        """
+        hsv_ids: (B, 3) int long   — 每行的 (h_id, s_id, v_id)
+        masks:   (B, 1, H, W) float — 每行的 mask
+
+        returns: (B, out_dim) — 完整 token 向量
+        """
+        # 颜色:HSV id → one-hot → MLP
+        B = hsv_ids.size(0)
+        colors_np = np.stack([hsv_id_to_onehot(int(h), int(s), int(v))
+                              for h, s, v in hsv_ids])   # (B, 46) numpy
+        colors = torch.from_numpy(colors_np).to(masks.device)   # (B, 46) tensor
+        c = self.color_enc(colors)                              # (B, geom_dim)
+        # 几何:mask → CNN
+        g = self.mask_enc(masks)                          # (B, geom_dim)
+        # 融合
+        if self.fuse_mode == "concat":
+            return self.fuse(torch.cat([g, c], dim=-1))
+        elif self.fuse_mode == "add":
+            return g + c
+        elif self.fuse_mode == "gate":
+            return self.fuse(g, c)
+        elif self.fuse_mode == "bilinear":
+            return self.fuse(g, c)
+
+
+def encode_color_tokens(rgb: np.ndarray,
+                        encoder: Optional["ColorTokenEncoder"] = None,
+                        char_hints: Optional[List[str]] = None,
+                        device: Optional[torch.device] = None,
+                        ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    一站式:图像 → (K, out_dim) 颜色敏感 token 向量。
+
+    rgb:        (H, W, 3) float32 [0, 1]
+    encoder:    ColorTokenEncoder 实例;None 时返回原始 (hsv_id, mask) 对
+    char_hints: 可选,前景按 x 排 = word 字符序
+    device:     encoder 所在 device
+
+    返回:
+        vecs:   (K, out_dim) float32,每行一个 token 向量;encoder=None 时为 list
+        bg_mask: (H, W) bool
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 1) 分解
+    tokens, bg_mask = decompose_image_to_tokens(rgb, mode="spatial",
+                                                char_hints=char_hints)
+
+    if encoder is None:
+        return tokens, bg_mask   # 原始 (color, mask) 对
+
+    # 2) 编码
+    encoder = encoder.to(device).eval()
+    K = len(tokens)
+    hsv_ids = torch.tensor([t[0] for t in tokens], dtype=torch.long)  # (K, 3)
+    masks = np.stack([t[1] for t in tokens])[:, None, :, :]            # (K, 1, H, W)
+    masks_t = torch.from_numpy(masks).to(device).float()
+
+    with torch.no_grad():
+        vecs = encoder(hsv_ids, masks_t)                                # (K, out_dim)
+
+    return vecs.cpu().numpy(), bg_mask
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # 烟测
 # ─────────────────────────────────────────────────────────────────────────
@@ -286,3 +478,18 @@ if __name__ == "__main__":
     cv2.imwrite("/tmp/decompose_viz.png",
                 cv2.cvtColor(viz, cv2.COLOR_RGB2BGR))
     print("  → saved /tmp/decompose_viz.png")
+
+    # ── ColorTokenEncoder 4 种 fuse_mode 烟测 ──
+    print("\n=== ColorTokenEncoder fuse modes ===")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    K = len(tokens)
+    hsv_ids = torch.tensor([t[0] for t in tokens], dtype=torch.long)
+    masks = np.stack([t[1] for t in tokens])[:, None, :, :]
+    masks_t = torch.from_numpy(masks).to(device).float()
+
+    for mode in ColorTokenEncoder.FUSE_MODES:
+        enc = ColorTokenEncoder(fuse_mode=mode).to(device).eval()
+        with torch.no_grad():
+            vecs = enc(hsv_ids, masks_t)
+        print(f"  {mode:>9s}: out shape = {tuple(vecs.shape)}  "
+              f"(K={K}, out_dim={enc.out_dim})")
