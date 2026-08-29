@@ -8,6 +8,7 @@
   masks = ds.masks()   # (N, H, W)  二值
   rgbs  = ds.rgbs()    # (N, H, W, 3) 彩色
 """
+import os
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from experiments.source.synthetic.config import (IMG_SIZE, FONT_SIZE, EN_LETTERS,
@@ -33,11 +34,20 @@ class Dataset:
     def _font(char, fs):
         if '一' <= char <= '鿿':
             for fp in ['C:/Windows/Fonts/simhei.ttf','C:/Windows/Fonts/msyh.ttc',
-                       'C:/Windows/Fonts/simsun.ttc']:
+                       'C:/Windows/Fonts/simsun.ttc',
+                       # Linux fallbacks
+                       os.path.expanduser('~/.local/share/fonts/wqy-microhei.ttc'),
+                       '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+                       '/usr/share/fonts/wqy-microhei/wqy-microhei.ttc']:
                 try: return ImageFont.truetype(fp, fs)
                 except OSError: continue
-        try: return ImageFont.truetype("C:/Windows/Fonts/arial.ttf", fs)
-        except OSError: return ImageFont.load_default()
+        for fp in ["C:/Windows/Fonts/arial.ttf",
+                   # Linux fallbacks
+                   '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+                   '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf']:
+            try: return ImageFont.truetype(fp, fs)
+            except OSError: continue
+        return ImageFont.load_default()
 
     def _render(self, char, color_rgb, pos, angle=0, font_size=None):
         s = self.img_size

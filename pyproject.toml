@@ -31,6 +31,7 @@ explicit = true
 [[tool.uv.index]]
 name = "tsinghua"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu118" }

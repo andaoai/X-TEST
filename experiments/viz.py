@@ -1,6 +1,7 @@
 """
 通用可视化工具 —— 每个实验的 viz() 方法会调用这些函数。
 """
+import os
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -12,7 +13,11 @@ from experiments.source.synthetic.config import SEED
 
 # 中文字体
 for _p in ['C:/Windows/Fonts/simhei.ttf','C:/Windows/Fonts/msyh.ttc',
-           'C:/Windows/Fonts/msyhbd.ttc']:
+           'C:/Windows/Fonts/msyhbd.ttc',
+           # Linux fallbacks
+           os.path.expanduser('~/.local/share/fonts/wqy-microhei.ttc'),
+           '/usr/share/fonts/truetype/wqy/wqy-microhei.ttc',
+           '/usr/share/fonts/wqy-microhei/wqy-microhei.ttc']:
     if Path(_p).exists():
         plt.rcParams['font.family'] = fm.FontProperties(fname=_p).get_name()
         break

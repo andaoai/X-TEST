@@ -7,7 +7,9 @@
   3. 在这里 import + 加入 ALGOS
 """
 from algorithms.template import MyAlgorithm
+from algorithms.color_tokens import ColorTokensAlgo
 
 ALGOS = {
-    "random_proj": MyAlgorithm(),
+    "random_proj":  MyAlgorithm(),        # 现有基线:整图随机投影
+    "color_tokens": ColorTokensAlgo(),    # 新算法:HSV 分解 + CNN token + 聚合(NLP 类比)
 }
