@@ -26,18 +26,17 @@ import torch.nn.functional as F
 import cv2
 
 from algorithms.base import BaseAlgorithm, EMBEDDING_DIM
-
-# ── HSV 桶配置(15 间隔)──
-# OpenCV H ∈ [0, 179],S/V ∈ [0, 255]
-H_BIN_SIZE = 15
-SV_BIN_SIZE = 15
-N_H_BINS = 180 // H_BIN_SIZE             # 12
-N_S_BINS = (256 + SV_BIN_SIZE - 1) // SV_BIN_SIZE   # 17
-N_V_BINS = (256 + SV_BIN_SIZE - 1) // SV_BIN_SIZE   # 17
-COLOR_ONEHOT_DIM = N_H_BINS + N_S_BINS + N_V_BINS   # 12 + 17 + 17 = 46
-
-_BG_V_THRESHOLD = 10
-_MIN_MASK_PIXELS = 4
+from algorithms.image_decomposition import (
+    decompose_image_to_tokens as _hsv_decompose,
+    hsv_id_to_onehot as _hsv_id_to_onehot,
+    batch_decompose,
+    visualize_tokens as visualize_decomposition,
+    token_stats,
+    N_H_BINS, N_S_BINS, N_V_BINS, COLOR_ONEHOT_DIM,
+    H_BIN_SIZE, SV_BIN_SIZE,
+    BG_V_THRESHOLD as _BG_V_THRESHOLD,
+    MIN_MASK_PIXELS as _MIN_MASK_PIXELS,
+)
 
 # ── Token 维度 ──
 TOKEN_GEOM_DIM = 32
@@ -47,102 +46,6 @@ EMB_HEAD_HIDDEN = 64
 CLS_TRUNK_HIDDEN = 64
 N_ATTN_HEADS = 4
 
-
-def _hsv_decompose(rgb: np.ndarray, mode: str = "bucket", char_hints: list = None):
-    """
-    rgb: (H, W, 3) float32 ∈ [0, 1]
-    mode:
-      "bucket"  - 按 (h_id, s_id, v_id) 三元组细粒度分桶,K 可能 1-20+
-      "spatial" - 前景做空间连通域(每个连通域 = 一个前景 token),
-                   黑色背景作为**一个独立 token** 放在最前。
-    char_hints: 可选。word 渲染时的字符序列 ["g", "o"] 等,用于把前景 token
-                按空间位置(质心 x)排序成 word 字符顺序。
-                None 时前景按 spatial 扫描顺序。
-
-    returns:
-        tokens: list of (hsv_id_tuple, mask)
-            hsv_id_tuple: (h_id, s_id, v_id) 各 int
-            mask:         (H, W) float32 二值
-            **位置 0 = 背景 token**(若存在);位置 1..K-1 = 前景(按 word 顺序或扫描序)
-        bg_mask: (H, W) bool(对外参考用)
-    """
-    h, w, _ = rgb.shape
-    rgb_u8 = (np.clip(rgb, 0, 1) * 255).astype(np.uint8)
-    hsv = cv2.cvtColor(rgb_u8, cv2.COLOR_RGB2HSV)             # (H, W, 3) uint8
-
-    H_ch = hsv[:, :, 0]
-    S_ch = hsv[:, :, 1]
-    V_ch = hsv[:, :, 2]
-
-    is_colored = (V_ch >= _BG_V_THRESHOLD) | (S_ch >= _BG_V_THRESHOLD)
-    h_id = (H_ch // H_BIN_SIZE).astype(np.int32)
-    s_id = np.minimum(S_ch // SV_BIN_SIZE, N_S_BINS - 1).astype(np.int32)
-    v_id = np.minimum(V_ch // SV_BIN_SIZE, N_V_BINS - 1).astype(np.int32)
-
-    bg_mask = V_ch < _BG_V_THRESHOLD
-    tokens = []
-
-    # 背景 token(若存在)
-    if bg_mask.sum() > _MIN_MASK_PIXELS:
-        bh = int(h_id[bg_mask].mean())
-        bs = int(s_id[bg_mask].mean())
-        bv = int(v_id[bg_mask].mean())
-        tokens.append(((bh, bs, bv), bg_mask.astype(np.float32)))
-
-    if mode == "spatial":
-        # 前景连通域
-        from scipy import ndimage
-        fg_u8 = is_colored.astype(np.uint8)
-        labeled, n_comp = ndimage.label(fg_u8, structure=np.ones((3, 3)))
-        fg_tokens = []
-        for comp_id in range(1, n_comp + 1):
-            m = (labeled == comp_id)
-            if m.sum() > _MIN_MASK_PIXELS:
-                hi = int(h_id[m].mean())
-                si = int(s_id[m].mean())
-                vi = int(v_id[m].mean())
-                fg_tokens.append(((hi, si, vi), m.astype(np.float32)))
-
-        if char_hints and len(char_hints) == len(fg_tokens):
-            # 按质心 x 排序(单词是从左到右),让 token 顺序 = word 字符顺序
-            centroids = []
-            for _, m in fg_tokens:
-                ys, xs = np.where(m > 0.5)
-                centroids.append(xs.mean() if len(xs) else 0.0)
-            order = np.argsort(centroids)
-            fg_tokens = [fg_tokens[i] for i in order]
-        # 不传 char_hints 就保持扫描顺序(等同 v5 行为)
-        tokens.extend(fg_tokens)
-    else:
-        # bucket 模式:按 HSV 桶细粒度分
-        bucket = h_id * (N_S_BINS * N_V_BINS) + s_id * N_V_BINS + v_id
-        fg_buckets = np.unique(bucket[is_colored])
-        for b in fg_buckets:
-            m = (bucket == b) & is_colored
-            if m.sum() > _MIN_MASK_PIXELS:
-                hi = int(h_id[m].mean())
-                si = int(s_id[m].mean())
-                vi = int(v_id[m].mean())
-                tokens.append(((hi, si, vi), m.astype(np.float32)))
-
-    if not tokens:
-        tokens.append(((0, 0, 0), np.zeros((h, w), np.float32)))
-
-    return tokens, bg_mask
-
-
-def _hsv_id_to_onehot(h_id: int, s_id: int, v_id: int) -> np.ndarray:
-    """(h_id, s_id, v_id) → (46,) 拼接 one-hot。"""
-    v = np.zeros(COLOR_ONEHOT_DIM, dtype=np.float32)
-    if 0 <= h_id < N_H_BINS:
-        v[h_id] = 1.0
-    s_off = N_H_BINS
-    if 0 <= s_id < N_S_BINS:
-        v[s_off + s_id] = 1.0
-    sv_off = N_H_BINS + N_S_BINS
-    if 0 <= v_id < N_V_BINS:
-        v[sv_off + v_id] = 1.0
-    return v
 
 
 class _MaskEncoder(nn.Module):
@@ -198,15 +101,20 @@ class _TokenSelfAttention(nn.Module):
         self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
         self.norm = nn.LayerNorm(dim)
 
-    def forward(self, tokens: torch.Tensor, return_weights: bool = False):
+    def forward(self, tokens: torch.Tensor, return_weights: bool = False,
+                key_padding_mask: torch.Tensor = None):
         """
         tokens: (B, K, 32) → (B, K, 32)
         K=1 时退化为 self-loop,K=2 时开始有信息交互。
         return_weights=True 时返回平均的 (B, K, K) attention weights。
+        key_padding_mask: (B, K) bool,True=该位置是 padding(忽略)。
+                          内部把 K=0 padding 位置在 softmax 前置 -inf。
         """
         if tokens.size(1) == 0:
             return (tokens, None) if return_weights else tokens
-        out, weights = self.attn(tokens, tokens, tokens, need_weights=return_weights)
+        out, weights = self.attn(tokens, tokens, tokens,
+                                 key_padding_mask=key_padding_mask,
+                                 need_weights=return_weights)
         out = self.norm(tokens + out)
         if return_weights:
             return out, weights
@@ -222,6 +130,16 @@ class ColorTokensAlgo(BaseAlgorithm):
         self.geom_mlp: nn.Linear | None = None
         self.color_mlp: _ColorMLP | None = None
         self.fusion: _TokenFusion | None = None
+        # ── 4 个独立 attention 模块:每个任务用自己的关联 ──
+        # attn_token:instance grouping(token_belongs)
+        # attn_wm:整体 valid/invalid(word_match)
+        # attn_n:词数(n_words)
+        # attn_wid:整词身份(word_id)
+        self.attn_token: _TokenSelfAttention | None = None
+        self.attn_wm: _TokenSelfAttention | None = None
+        self.attn_n: _TokenSelfAttention | None = None
+        self.attn_wid: _TokenSelfAttention | None = None
+        # 兼容旧名(单 attention 时代的引用):指向 attn_wm
         self.self_attn: _TokenSelfAttention | None = None
         self.emb_head: nn.Linear | None = None     # pool(97) → 128
         self.cls_trunk: nn.Linear | None = None    # pool(97) → 64
@@ -237,8 +155,17 @@ class ColorTokensAlgo(BaseAlgorithm):
         self.color_mlp = _ColorMLP(COLOR_ONEHOT_DIM, TOKEN_GEOM_DIM).to(device)
         torch.manual_seed(42)
         self.fusion = _TokenFusion(2 * TOKEN_GEOM_DIM, TOKEN_GEOM_DIM).to(device)
+        # ── 4 个独立 attention(分别 seed,保证各自起点不同)──
         torch.manual_seed(42)
-        self.self_attn = _TokenSelfAttention(TOKEN_GEOM_DIM, N_ATTN_HEADS).to(device)
+        self.attn_token = _TokenSelfAttention(TOKEN_GEOM_DIM, N_ATTN_HEADS).to(device)
+        torch.manual_seed(43)
+        self.attn_wm = _TokenSelfAttention(TOKEN_GEOM_DIM, N_ATTN_HEADS).to(device)
+        torch.manual_seed(44)
+        self.attn_n = _TokenSelfAttention(TOKEN_GEOM_DIM, N_ATTN_HEADS).to(device)
+        torch.manual_seed(45)
+        self.attn_wid = _TokenSelfAttention(TOKEN_GEOM_DIM, N_ATTN_HEADS).to(device)
+        # 兼容引用
+        self.self_attn = self.attn_wm
         torch.manual_seed(42)
         # emb_head: pool 97 → 128(用 std=0.1 让初始 embedding 数值合理)
         self.emb_head = nn.Linear(POOL_IN_DIM, EMBEDDING_DIM).to(device)
@@ -475,3 +402,175 @@ class ColorTokensAlgo(BaseAlgorithm):
         self.eval_all()
         return {"final_loss": loss_curve[-1], "final_acc": acc,
                 "loss_curve": loss_curve, "tasks": tasks}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Batch 版流水线(A + B 改造)
+# ──────────────────────────────────────────────────────────────────────────
+# 核心思想(与单图路径完全等价,只是用张量并行做):
+#   1) _hsv_decompose 仍在 CPU 上 per-sample 跑(连通域是 2D 算法,GPU 不划算;
+#      单图通常 < 1ms,瓶颈不在这里)
+#   2) 把 N 个样本的 (K_i, H, W) mask、(K_i, 46) onehot 堆到固定 K_max:
+#        masks_padded   : (N, K_max, H, W)   padding=0
+#        onehots_padded : (N, K_max, 46)     padding=0
+#        key_padding_mask: (N, K_max)        True=无效位置
+#   3) 一次性送 GPU,CNN → fusion → attn(用 key_padding_mask)→ pool(用 mask)
+#   4) 4 个分类头 + token_belongs 头全部向量化
+#
+# 不变(思想保护):
+#   - HSV 桶量化 + 空间连通域
+#   - 背景算 token、BG 在最前
+#   - token 顺序不强制对齐 char
+#   - 无 group_id 信号
+# ════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass
+from typing import List, Tuple
+
+
+@dataclass
+class _PerSampleTokens:
+    """每样本 token 化结果(保留与 _hsv_decompose 同样的字段)。"""
+    masks: np.ndarray           # (K, H, W) float32
+    hsv_ids: np.ndarray         # (K, 3) int32
+    K: int
+
+
+def precompute_tokens(rgbs: np.ndarray, mode: str = "spatial",
+                     char_hints_list: list = None) -> List[_PerSampleTokens]:
+    """
+    批量跑 _hsv_decompose(仍在 CPU,因连通域是 2D 操作)。
+    每样本独立 → 不损失信息。
+    char_hints_list: 可选,长度 = N,每个元素是该样本渲染端的字符序列
+                    (用于把前景 token 按 x 排序 = word 字符顺序)。
+                    None 时前景保持扫描顺序。
+    """
+    out = []
+    for i in range(rgbs.shape[0]):
+        hints = char_hints_list[i] if char_hints_list is not None else None
+        tokens, _ = _hsv_decompose(rgbs[i], mode=mode, char_hints=hints)
+        masks = np.stack([m for _, m in tokens]).astype(np.float32)
+        hsv_ids = np.array([hsv for hsv, _ in tokens], dtype=np.int32)
+        out.append(_PerSampleTokens(masks=masks, hsv_ids=hsv_ids, K=len(tokens)))
+    return out
+
+
+def pad_tokens_to_batch(per_sample: List[_PerSampleTokens], K_max: int
+                        ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    把变长 K 的 token 序列 padding 到 K_max。
+    Returns:
+        masks_padded:   (N, K_max, H, W) float32 on CPU(送 GPU 之前)
+        onehots_padded: (N, K_max, 46)   float32
+        kp_mask:         (N, K_max)        bool  True=padding(忽略)
+        K_true:          (N,)              int32 真实 K
+    """
+    N = len(per_sample)
+    H, W = per_sample[0].masks.shape[1], per_sample[0].masks.shape[2]
+    masks_padded = np.zeros((N, K_max, H, W), dtype=np.float32)
+    onehots_padded = np.zeros((N, K_max, COLOR_ONEHOT_DIM), dtype=np.float32)
+    kp_mask = np.ones((N, K_max), dtype=bool)   # 默认全 True=padding
+    K_true = np.zeros(N, dtype=np.int32)
+
+    for i, ps in enumerate(per_sample):
+        k = min(ps.K, K_max)
+        masks_padded[i, :k] = ps.masks[:k]
+        # onehot
+        for j in range(k):
+            h_id, s_id, v_id = ps.hsv_ids[j]
+            onehots_padded[i, j] = _hsv_id_to_onehot(int(h_id), int(s_id), int(v_id))
+        kp_mask[i, :k] = False                     # 有效位置
+        K_true[i] = k
+    return (torch.from_numpy(masks_padded),
+            torch.from_numpy(onehots_padded),
+            torch.from_numpy(kp_mask),
+            torch.from_numpy(K_true))
+
+
+@torch.no_grad()
+def encode_packed_batch(algo: "ColorTokensAlgo",
+                        masks_padded: torch.Tensor,
+                        onehots_padded: torch.Tensor,
+                        kp_mask: torch.Tensor,
+                        K_true: torch.Tensor,
+                        return_attn: bool = False
+                        ) -> dict:
+    """
+    一次性前向 N 个 padding 后样本,返回:
+      tok:        (N, K_max, 32)  attention 后 token
+      pool:       (N, 97)        mean+max+min+K(只对有效 token 池化)
+      K_true:     (N,)            int32
+      attn:       (N, K_max, K_max) float32  可选
+    注:padding 位置的 tok 全 0(attn mask 保证),pool 通过 K_true 屏蔽。
+    """
+    device = algo._device
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        algo._build(device)
+    masks = masks_padded.to(device, non_blocking=True)               # (N, K, H, W)
+    onehots = onehots_padded.to(device, non_blocking=True)           # (N, K, 46)
+    kp = kp_mask.to(device)                                          # (N, K) True=padding
+    N, K_max = masks.shape[0], masks.shape[1]
+
+    # ── 几何 token:CNN 看每张 mask ──
+    # reshape (N, K, H, W) → (N*K, 1, H, W) → 过 CNN → (N*K, 32) → reshape (N, K, 32)
+    masks_flat = masks.reshape(N * K_max, 1, masks.shape[-2], masks.shape[-1])
+    geom_flat = algo.encoder(masks_flat)                             # (N*K, 32)
+    geom = geom_flat.view(N, K_max, TOKEN_GEOM_DIM)
+    g = algo.geom_mlp(geom)                                          # (N, K, 32)
+    c = algo.color_mlp(onehots)                                       # (N, K, 32)
+    tok = algo.fusion(g, c)                                           # (N, K, 32)
+
+    # ── 4 个独立 Self-attention:每个任务用自己的关联 ──
+    # attn_token:instance grouping(token_belongs)
+    # attn_wm:整体 valid/invalid(word_match)
+    # attn_n:词数(n_words)
+    # attn_wid:整词身份(word_id)
+    tok_token, attn_w_token = algo.attn_token(tok, return_weights=True,
+                                              key_padding_mask=kp)
+    tok_wm, attn_w_wm = algo.attn_wm(tok, return_weights=True,
+                                     key_padding_mask=kp)
+    tok_n, attn_w_n = algo.attn_n(tok, return_weights=True,
+                                  key_padding_mask=kp)
+    tok_wid, attn_w_wid = algo.attn_wid(tok, return_weights=True,
+                                        key_padding_mask=kp)
+
+    # ── Pool:每个 attention 输出独立 pool(mean+max+min+K) ──
+    def _pool(tok_attn):
+        valid_mask = (~kp)                                                  # (N, K) bool
+        safe_count = valid_mask.float().sum(dim=1, keepdim=True).clamp(min=1.0)
+        tok_masked = tok_attn * valid_mask.float().unsqueeze(-1)            # (N, K, 32)
+        mean = tok_masked.sum(dim=1) / safe_count                           # (N, 32)
+        NEG_INF = torch.finfo(tok_attn.dtype).min
+        POS_INF = torch.finfo(tok_attn.dtype).max
+        tok_for_max = torch.masked_fill(tok_attn, kp.unsqueeze(-1), NEG_INF)
+        tok_for_min = torch.masked_fill(tok_attn, kp.unsqueeze(-1), POS_INF)
+        mx = tok_for_max.max(dim=1).values
+        mn = tok_for_min.min(dim=1).values
+        k_feat = K_true.float().to(device).unsqueeze(-1) / float(K_max)
+        return torch.cat([mean, mx, mn, k_feat], dim=-1)                     # (N, 97)
+
+    pool_token = _pool(tok_token)
+    pool_wm    = _pool(tok_wm)
+    pool_n     = _pool(tok_n)
+    pool_wid   = _pool(tok_wid)
+    # 保留旧 pool(用 tok_wm,即 attn_wm 输出,跟旧 attn 一致)
+    pool = pool_wm
+
+    out = {
+        # 4 套 attention 输出 + 4 套 pool
+        "tok_token": tok_token, "pool_token": pool_token,
+        "tok_wm":    tok_wm,    "pool_wm":    pool_wm,
+        "tok_n":     tok_n,     "pool_n":     pool_n,
+        "tok_wid":   tok_wid,   "pool_wid":   pool_wid,
+        # 兼容旧引用
+        "tok":       tok_wm,    "tok_pre_attn": tok, "pool": pool,
+        "K_true":    K_true,
+    }
+    if return_attn:
+        out["attn_token"] = attn_w_token
+        out["attn_wm"]    = attn_w_wm
+        out["attn_n"]     = attn_w_n
+        out["attn_wid"]   = attn_w_wid
+        out["attn"]       = attn_w_wm   # 兼容旧
+    return out
