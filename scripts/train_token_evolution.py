@@ -69,7 +69,7 @@ def remap(labels_full, sub_idx):
 
 
 def encode_image_batch(algo, rgb_batch):
-    algo.encoder.eval(); algo.agg.eval()
+    algo.eval_all()
     out = np.zeros((len(rgb_batch), EMBEDDING_DIM), dtype=np.float32)
     with torch.no_grad():
         for i in range(len(rgb_batch)):
@@ -78,28 +78,8 @@ def encode_image_batch(algo, rgb_batch):
 
 
 def encode_tokens(algo, rgb_batch):
-    """(N*K, 32) token 几何 + (N*K,) sample_id + (N*K,) is_fg"""
-    device = algo._device
-    algo.encoder.eval()
-    all_vecs, all_sid, all_fg = [], [], []
-    for sample_i in range(len(rgb_batch)):
-        tokens, _, _ = _hsv_decompose(rgb_batch[sample_i])
-        masks = np.stack([m for _, m in tokens])
-        masks_t = torch.from_numpy(masks).unsqueeze(1).to(device)
-        with torch.no_grad():
-            geom = algo.encoder(masks_t).cpu().numpy()
-        n = len(tokens)
-        is_fg = np.zeros(n, dtype=np.int32)
-        if n > 1:
-            is_fg[1:] = 1
-        elif n == 1 and tokens[0][1].mean() > 0.1:
-            is_fg[0] = 1
-        all_vecs.append(geom)
-        all_sid.append(np.full(n, sample_i, dtype=np.int32))
-        all_fg.append(is_fg)
-    return (np.concatenate(all_vecs).astype(np.float32),
-            np.concatenate(all_sid),
-            np.concatenate(all_fg))
+    """直接调 algo.encode_tokens,新架构已实现"""
+    return algo.encode_tokens(rgb_batch)
 
 
 def tsne_2d(emb, seed=42):
@@ -158,7 +138,8 @@ def main():
     for task in tasks:
         n_classes = len(labels_sub[task])
         torch.manual_seed(42)
-        algo.clfs[task] = nn.Linear(EMBEDDING_DIM, n_classes).to(device)
+        # 新架构:分类头接在 cls_trunk 输出(64 维)
+        algo.clfs[task] = nn.Linear(64, n_classes).to(device)
         cls_to_int = {c: i for i, c in enumerate(sorted(labels_sub[task].keys()))}
         y = np.full(len(rgb_sub), -1, dtype=np.int64)
         for cls, idxs in labels_sub[task].items():
@@ -166,7 +147,13 @@ def main():
                 y[i] = cls_to_int[cls]
         ys[task] = y
 
-    params = list(algo.encoder.parameters()) + list(algo.agg.parameters())
+    params = (list(algo.encoder.parameters()) +
+              list(algo.geom_mlp.parameters()) +
+              list(algo.color_mlp.parameters()) +
+              list(algo.fusion.parameters()) +
+              list(algo.self_attn.parameters()) +
+              list(algo.emb_head.parameters()) +
+              list(algo.cls_trunk.parameters()))
     for t in tasks:
         params += list(algo.clfs[t].parameters())
     opt = torch.optim.Adam(params, lr=args.lr)
@@ -254,19 +241,18 @@ def main():
 
     for epoch in range(args.epochs + 1):
         if epoch > 0:
-            algo.encoder.train(); algo.agg.train()
-            for t in tasks:
-                algo.clfs[t].train()
+            algo.train_all()
 
             perm = np.random.permutation(N)
             total_loss = 0.0
             correct = {t: 0 for t in tasks}
             for i in perm:
-                emb = algo._encode_one_train(rgb_sub[i])
+                pool = algo._pool_one(rgb_sub[i])
+                trunk = torch.nn.functional.relu(algo.cls_trunk(pool))
                 opt.zero_grad()
                 loss = torch.tensor(0.0, device=device)
                 for task in tasks:
-                    logits = algo.clfs[task](emb)
+                    logits = algo.clfs[task](trunk)
                     target = torch.tensor([ys[task][i]], device=device)
                     loss = loss + loss_fn(logits.unsqueeze(0), target)
                     if logits.argmax().item() == ys[task][i]:
