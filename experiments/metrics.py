@@ -72,6 +72,45 @@ def calc_group_separation(sim: np.ndarray, groups: dict) -> float:
     return float(np.mean(within) - np.mean(between))
 
 
+def _sample_value_array(labels: dict, field: str, n: int) -> np.ndarray:
+    """labels 倒排索引 → 每样本的属性值数组(未覆盖位置为空字符串)。"""
+    vals = np.full(n, "", dtype=object)
+    for value, idxs in labels[field].items():
+        vals[np.asarray(idxs)] = str(value)
+    return vals
+
+
+def calc_attr_effect(sim: np.ndarray, labels: dict, attr: str,
+                     fixed: list[str]) -> float:
+    """
+    控制变量下"属性被编码的强度" = 1 − mean_sim(仅该属性不同的样本对)。
+
+    每个(固定属性组合 × 变化属性值)只有 1 个样本时,没有组内重复,
+    组内/组间分离度无法计算。改用严格配对:
+
+      找出所有 fixed 属性完全相同、仅 attr 取值不同的样本对,
+      它们的相似度下降量 1 - mean(sim) 就是该属性的编码强度。
+
+    与独立性判据天然互斥: drop > 0.05 → 属性可分;
+    1 - drop > 0.90(即 drop < 0.10)→ 属性独立。
+    """
+    n = sim.shape[0]
+    triu = ~np.eye(n, dtype=bool)
+    ai = _sample_value_array(labels, attr, n)
+    covered = ai != ""
+
+    diff = (ai[:, None] != ai[None, :]) & triu
+    diff &= covered[:, None] & covered[None, :]
+    for f in fixed:
+        fa = _sample_value_array(labels, f, n)
+        fc = fa != ""
+        diff &= (fa[:, None] == fa[None, :]) & fc[:, None] & fc[None, :]
+
+    if diff.sum() == 0:
+        return 0.0
+    return float(1.0 - sim[diff].mean())
+
+
 def filter_labels(labels: dict, constraints: dict) -> list:
     """
     根据约束条件筛选样本索引

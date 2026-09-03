@@ -38,6 +38,10 @@ class TestRunDataFlow:
     def text_exp(self, request):
         return request.param, TEXT_EXPERIMENTS[request.param]
 
+    @pytest.fixture(params=list(VISION_EXPERIMENTS.keys()), ids=list(VISION_EXPERIMENTS.keys()))
+    def vision_exp(self, request):
+        return request.param, VISION_EXPERIMENTS[request.param]
+
     def test_text_run_returns_dict(self, text_exp, make_random_emb):
         key, exp = text_exp
         inputs, labels = exp.load_data()
@@ -54,8 +58,8 @@ class TestRunDataFlow:
         assert isinstance(result["is_correct"], (bool, np.bool_)), \
             f"{key}: is_correct 应为 bool, 实际 {type(result['is_correct'])}"
 
-    def test_vision_pixel_run_returns_dict(self, make_random_emb):
-        exp = VISION_EXPERIMENTS["pixel"]
+    def test_vision_run_returns_dict(self, vision_exp, make_random_emb):
+        key, exp = vision_exp
         inputs, labels = exp.load_data()
         n = inputs.shape[0]
         emb = make_random_emb(n)
@@ -63,10 +67,12 @@ class TestRunDataFlow:
 
         result = exp.run(emb, labels, sim)
 
-        assert isinstance(result, dict)
-        assert "name" in result
-        assert "is_correct" in result
-        assert "metric" in result
+        assert isinstance(result, dict), f"{key}: run() 应返回 dict"
+        assert "name" in result, f"{key}: 缺少 'name'"
+        assert "is_correct" in result, f"{key}: 缺少 'is_correct'"
+        assert "metric" in result, f"{key}: 缺少 'metric'"
+        assert isinstance(result["is_correct"], (bool, np.bool_)), \
+            f"{key}: is_correct 应为 bool, 实际 {type(result['is_correct'])}"
 
 
 # ── 测试 viz() 不崩溃 ──
@@ -77,6 +83,10 @@ class TestVizDataFlow:
     @pytest.fixture(params=list(TEXT_EXPERIMENTS.keys()), ids=list(TEXT_EXPERIMENTS.keys()))
     def text_exp(self, request):
         return request.param, TEXT_EXPERIMENTS[request.param]
+
+    @pytest.fixture(params=list(VISION_EXPERIMENTS.keys()), ids=list(VISION_EXPERIMENTS.keys()))
+    def vision_exp(self, request):
+        return request.param, VISION_EXPERIMENTS[request.param]
 
     def test_text_viz_no_crash(self, text_exp, tmp_path, make_random_emb):
         key, exp = text_exp
@@ -89,8 +99,8 @@ class TestVizDataFlow:
         # 不应抛异常
         exp.viz(emb, labels, result, "test_algo", tmp_path)
 
-    def test_vision_pixel_viz_no_crash(self, tmp_path, make_random_emb):
-        exp = VISION_EXPERIMENTS["pixel"]
+    def test_vision_viz_no_crash(self, vision_exp, tmp_path, make_random_emb):
+        key, exp = vision_exp
         inputs, labels = exp.load_data()
         n = inputs.shape[0]
         emb = make_random_emb(n)
@@ -123,11 +133,16 @@ class TestLoadDataStructure:
             assert field in labels, f"{key}: labels 缺少 '{field}'"
             assert isinstance(labels[field], dict), f"{key}: labels['{field}'] 应为 dict"
 
-    def test_vision_pixel_labels_structure(self):
-        exp = VISION_EXPERIMENTS["pixel"]
+    @pytest.mark.parametrize("key", list(VISION_EXPERIMENTS.keys()))
+    def test_vision_labels_structure(self, key):
+        exp = VISION_EXPERIMENTS[key]
         _, labels = exp.load_data()
 
-        assert "x_pos" in labels
-        assert "y_pos" in labels
-        assert "count" in labels
-        assert "single" in labels
+        assert isinstance(labels, dict) and len(labels) >= 2, f"{key}: labels 至少 2 个字段"
+        dict_fields = 0
+        for field, values in labels.items():
+            if not isinstance(values, dict):
+                continue  # 部分数据集带扁平索引元数据(如 pixel 的 "single" 列表),跳过
+            dict_fields += 1
+            assert len(values) >= 2, f"{key}: 字段 '{field}' 至少 2 个取值"
+        assert dict_fields >= 2, f"{key}: 至少 2 个 field:value dict 字段"

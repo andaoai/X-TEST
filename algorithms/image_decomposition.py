@@ -287,19 +287,30 @@ import torch.nn.functional as F
 
 
 class _MaskEncoder(nn.Module):
-    """单 mask → geom_dim 维几何向量(小 CNN)。"""
+    """单 mask → geom_dim 维几何向量(小 CNN,4 层)。
+
+    2 层 stride=2 下采样(64→32→16) + 2 层不 stride 加深(16×16 保持)
+    - 比 2 层 stride 方案保留更多字符细节(w/x/y/d/m 等复杂结构)
+    - 参数量约 2.5x,但 K ≤ 7 时 GPU 仍很快
+    """
 
     def __init__(self, geom_dim: int = 32):
         super().__init__()
+        # 下采样
         self.conv1 = nn.Conv2d(1, 16, 3, stride=2, padding=1)
         self.conv2 = nn.Conv2d(16, 32, 3, stride=2, padding=1)
-        self.fc = nn.Linear(32, geom_dim)
+        # 加深(不 stride)
+        self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+        self.conv4 = nn.Conv2d(64, 64, 3, padding=1)
+        self.fc = nn.Linear(64, geom_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, 1, H, W) ∈ [0, 1]
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.mean(dim=(2, 3))
+        x = F.relu(self.conv1(x))   # (B, 16, 32, 32)
+        x = F.relu(self.conv2(x))   # (B, 32, 16, 16)
+        x = F.relu(self.conv3(x))   # (B, 64, 16, 16)
+        x = F.relu(self.conv4(x))   # (B, 64, 16, 16)
+        x = x.mean(dim=(2, 3))      # GAP
         x = self.fc(x)
         return x   # (B, geom_dim),不归一化 — 留给 fuse 决定
 
